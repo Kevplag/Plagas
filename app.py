@@ -75,7 +75,7 @@ if file_csv and file_geojson:
             if df_finca[c].dtype == object:
                 df_finca[c] = df_finca[c].astype(str).str.replace(',', '.')
 
-        # Detección inteligente de coordenadas latitud/longitud
+        # Detección inteligente de coordenadas
         col_lat, col_lon = None, None
         for col in df_finca.columns:
             try:
@@ -117,6 +117,7 @@ if file_csv and file_geojson:
             z = df_finca[col_val].to_numpy(dtype=float)
 
             xmin, ymin, xmax, ymax = gdf_finca.total_bounds
+            # Expandir el margen derecho para dar espacio a la leyenda
             dx = (xmax - xmin) * 0.05
             dy = (ymax - ymin) * 0.05
             grid_x, grid_y = np.meshgrid(
@@ -133,63 +134,60 @@ if file_csv and file_geojson:
             zi[~mask] = np.nan
             grid_z = zi.reshape(grid_x.shape)
 
-            # --- PALETA Y RANGOS EXACTOS DE ARCGIS ---
+            # Paleta y rangos exactos de ArcGIS
             levels = [0.0, 10.1, 20.1, 29.1, 40.1, 101.0]
-            # Verde Oscuro, Verde Claro, Amarillo, Rojo, Rojo Oscuro
             colors = ['#2e7d32', '#8bc34a', '#ffeb3b', '#f44336', '#800000']
             
             cmap = mcolors.ListedColormap(colors)
             norm = mcolors.BoundaryNorm(levels, cmap.N)
 
-            fig, ax = plt.subplots(figsize=(12, 8.5), dpi=300)
+            fig, ax = plt.subplots(figsize=(13, 8.5), dpi=300)
 
-            # Capa de Interpolación IDW
+            # Interpolación IDW
             contour = ax.contourf(grid_x, grid_y, grid_z, levels=levels, cmap=cmap, norm=norm, alpha=0.9, zorder=2)
 
-            # Bordes de Lotes (Estilo ArcGIS)
-            gdf_finca.plot(ax=ax, facecolor="none", edgecolor="black", linewidth=1.2, zorder=3)
+            # Capa Lotes
+            gdf_finca.plot(ax=ax, facecolor="none", edgecolor="black", linewidth=1.1, zorder=3)
 
-            # Etiquetas de Nombre de Lotes
+            # Etiquetas de Nombre de Lotes en el centro
             col_lote_nombre = [c for c in gdf_finca.columns if c.upper() in ['CAMPO', 'LOTE', 'CODIGO_CAM', 'NOMBRE']]
             if col_lote_nombre:
                 for _, row in gdf_finca.iterrows():
                     centroid = row.geometry.centroid
                     nombre_lote = str(row[col_lote_nombre[0]])
-                    ax.text(centroid.x, centroid.y, nombre_lote, fontsize=8, fontweight='bold',
+                    ax.text(centroid.x, centroid.y, nombre_lote, fontsize=7.5, fontweight='bold',
                             ha='center', va='center', color='black',
-                            bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7, edgecolor='none'),
+                            bbox=dict(boxstyle='round,pad=0.15', facecolor='white', alpha=0.6, edgecolor='none'),
                             zorder=4)
 
-            # --- PUNTOS DE MONITOREO Y VALORES EN % (ESTILO ARCGIS) ---
-            # Dibujar punto central café con borde oscuro
-            ax.scatter(x, y, c='#5d4037', edgecolors='black', linewidth=0.8, s=35, zorder=6)
+            # Puntos de Muestreo
+            ax.scatter(x, y, c='#5d4037', edgecolors='black', linewidth=0.8, s=30, zorder=6)
 
-            # Etiquetas con el valor porcentual sobre cada punto
+            # Etiquetas del % de Infestación (desplazadas hacia arriba/derecha para no chocar con el lote)
             for px, py, pz in zip(x, y, z):
                 val_text = f"{int(round(pz))}%"
-                ax.text(px + (xmax - xmin)*0.012, py + (ymax - ymin)*0.012, val_text,
-                        fontsize=8.5, fontweight='bold', color='black',
-                        bbox=dict(boxstyle='round,pad=0.25', facecolor='white', edgecolor='gray', linewidth=0.8),
-                        zorder=7)
+                ax.text(px + (xmax - xmin)*0.018, py + (ymax - ymin)*0.012, val_text,
+                        fontsize=7.5, fontweight='bold', color='black',
+                        bbox=dict(boxstyle='round,pad=0.2', facecolor='white', edgecolor='gray', linewidth=0.6, alpha=0.95),
+                        ha='left', va='bottom', zorder=7)
 
             ax.set_xlim(xmin - dx, xmax + dx)
             ax.set_ylim(ymin - dy, ymax + dy)
             ax.axis('off')
 
-            # --- LEYENDA ESTILO ARCGIS ---
+            # --- LEYENDA UBICADA FUERA DEL MAPA (A la derecha) ---
             legend_patches = [
                 mpatches.Patch(color='#2e7d32', label='0% - 10%'),
                 mpatches.Patch(color='#8bc34a', label='11% - 20%'),
                 mpatches.Patch(color='#ffeb3b', label='21% - 29%'),
                 mpatches.Patch(color='#f44336', label='30% - 40%'),
                 mpatches.Patch(color='#800000', label='41% - 100%'),
-                plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#5d4037', markeredgecolor='black', markersize=7, label='Puntos de Muestreo')
+                plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#5d4037', markeredgecolor='black', markersize=6, label='Puntos de Muestreo')
             ]
-            ax.legend(handles=legend_patches, loc='lower right', frameon=True, framealpha=0.95, 
-                      facecolor='white', edgecolor='black', title="INFESTACION DE BROTES\n<RANGOS>", 
-                      title_fontsize='9', fontsize=8.5)
+            ax.legend(handles=legend_patches, loc='lower left', bbox_to_anchor=(1.01, 0.05),
+                      frameon=True, framealpha=1.0, facecolor='white', edgecolor='black', 
+                      title="INFESTACION DE BROTES\n<RANGOS>", title_fontsize='8.5', fontsize=8)
 
-            # Título principal
             ax.set_title(f"MAPA DE INTERPOLACIÓN IDW - COCHINILLA\n{var_label.upper()} | FINCA: {str(finca_sel).upper()}\n[{desc_texto}]", 
                          fontsize=12, fontweight='bold', pad=15)
 
