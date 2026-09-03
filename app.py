@@ -22,7 +22,6 @@ file_geojson = st.sidebar.file_uploader("Subir Lotes Finca (GeoJSON/KML)", type=
 
 def idw_interpolation(x, y, z, xi, yi, power=2):
     dist = distance.cdist(np.column_stack((xi, yi)), np.column_stack((x, y)))
-    # Evitar división por cero si el punto coincide exactamente
     dist = np.where(dist == 0, 1e-10, dist)
     weights = 1.0 / (dist ** power)
     weights /= weights.sum(axis=1, keepdims=True)
@@ -31,7 +30,6 @@ def idw_interpolation(x, y, z, xi, yi, power=2):
 
 if file_csv and file_geojson:
     try:
-        # Carga de CSV con detección automática de separador
         try:
             df_points = pd.read_csv(file_csv, sep=';')
             if len(df_points.columns) <= 1:
@@ -41,7 +39,6 @@ if file_csv and file_geojson:
             file_csv.seek(0)
             df_points = pd.read_csv(file_csv, sep=',')
 
-        # Reproyección a WGS84 (estándar para lat/lon)
         gdf_lotes = gpd.read_file(file_geojson)
         if gdf_lotes.crs is not None and gdf_lotes.crs.to_string() != "EPSG:4326":
             gdf_lotes = gdf_lotes.to_crs(epsg=4326)
@@ -52,7 +49,6 @@ if file_csv and file_geojson:
 
         st.sidebar.header("2. Filtros y Parámetros IDW")
 
-        # Filtro de Finca
         col_finca = [c for c in df_points.columns if 'FINCA' in c.upper()]
         if col_finca:
             fincas = df_points[col_finca[0]].dropna().unique()
@@ -62,7 +58,6 @@ if file_csv and file_geojson:
             finca_sel = "General"
             df_finca = df_points.copy()
 
-        # Detección de Variables a interpolar
         col_brotes = [c for c in df_finca.columns if 'BROTE' in c.upper()]
         col_macollas = [c for c in df_finca.columns if 'MACOLLA' in c.upper()]
 
@@ -73,34 +68,30 @@ if file_csv and file_geojson:
         var_label = st.sidebar.selectbox("Variable a Interpolar", list(dict_opciones.keys()))
         col_val = dict_opciones[var_label]
 
-        # Parámetros IDW
         power_idw = st.sidebar.slider("Potencia IDW (p)", min_value=1.0, max_value=5.0, value=2.0, step=0.5)
         resolution = st.sidebar.slider("Resolución Malla", min_value=50, max_value=300, value=200)
 
-        # Limpieza de valores para análisis numérico
         for c in df_finca.columns:
             if df_finca[c].dtype == object:
                 df_finca[c] = df_finca[c].astype(str).str.replace(',', '.')
 
-        # DETECCIÓN INTELIGENTE DE COORDENADAS (Soluciona el problema de X/Y invertidos)
+        # Detección inteligente de coordenadas
         col_lat, col_lon = None, None
         for col in df_finca.columns:
             try:
                 temp_vals = pd.to_numeric(df_finca[col], errors='coerce').dropna()
                 if not temp_vals.empty:
                     mean_val = temp_vals.mean()
-                    if 10 < mean_val < 16:  # Valores en Nicaragua para Latitud (~12)
+                    if 10 < mean_val < 16:  # Rango de Latitud Nicaragua
                         col_lat = col
-                    elif -90 < mean_val < -80: # Valores en Nicaragua para Longitud (~-86)
+                    elif -90 < mean_val < -80: # Rango de Longitud Nicaragua
                         col_lon = col
             except:
                 pass
         
-        # Fallback si no se detectan automáticamente
         if not col_lat: col_lat = 'Y' if 'Y' in df_finca.columns else 'Latitud'
         if not col_lon: col_lon = 'X' if 'X' in df_finca.columns else 'Longitud'
 
-        # Limpieza de Variable Z (%)
         df_finca[col_val] = df_finca[col_val].astype(str).str.rstrip('%')
         df_finca[col_val] = pd.to_numeric(df_finca[col_val], errors='coerce')
         if df_finca[col_val].max() <= 1.0 and df_finca[col_val].max() > 0:
@@ -108,11 +99,9 @@ if file_csv and file_geojson:
 
         df_finca = df_finca.dropna(subset=[col_lat, col_lon, col_val])
 
-        # Obtener MUESTREO_DESCRIPCION
         col_desc = [c for c in df_finca.columns if 'MUESTREO_DESCRIPCION' in c.upper() or 'MUESTREO' in c.upper()]
         desc_texto = df_finca[col_desc[0]].iloc[0] if col_desc else "MUESTREO DE CAMPO"
 
-        # Filtrar Lotes Espaciales
         col_finca_geo = [c for c in gdf_lotes.columns if 'FINCA' in c.upper() or 'CAMPO' in c.upper()]
         if col_finca_geo and finca_sel != "General":
             gdf_finca = gdf_lotes[gdf_lotes[col_finca_geo[0]].astype(str).str.lower() == str(finca_sel).lower()]
@@ -123,15 +112,13 @@ if file_csv and file_geojson:
 
         # --- BOTÓN DE GENERACIÓN ---
         if st.sidebar.button("🚀 Generar Mapa IDW", type="primary"):
-            # IMPORTANTE: x es Longitud (eje X geográfico), y es Latitud (eje Y geográfico)
             x = df_finca[col_lon].to_numpy(dtype=float)
             y = df_finca[col_lat].to_numpy(dtype=float)
             z = df_finca[col_val].to_numpy(dtype=float)
 
-            # Creación de Malla
             xmin, ymin, xmax, ymax = gdf_finca.total_bounds
-            dx = (xmax - xmin) * 0.03
-            dy = (ymax - ymin) * 0.03
+            dx = (xmax - xmin) * 0.05
+            dy = (ymax - ymin) * 0.05
             grid_x, grid_y = np.meshgrid(
                 np.linspace(xmin - dx, xmax + dx, resolution),
                 np.linspace(ymin - dy, ymax + dy, resolution)
@@ -140,31 +127,29 @@ if file_csv and file_geojson:
             xi = grid_x.flatten()
             yi = grid_y.flatten()
 
-            # IDW y Máscara de Polígonos
             zi = idw_interpolation(x, y, z, xi, yi, power=power_idw)
             union_poly = gdf_finca.geometry.unary_union
             mask = contains(union_poly, xi, yi)
             zi[~mask] = np.nan
             grid_z = zi.reshape(grid_x.shape)
 
-            # --- PALETA DE COLORES Y RANGOS ESTRICTOS ---
-            # 0=Azul, 1-10=Verde, 11-29=Amarillo, 30-60=Rojo Claro, 61-100=Rojo Intenso
-            levels = [0.0, 1.0, 11.0, 30.0, 61.0, 101.0]
-            colors = ['#1f77b4', '#2ca02c', '#ffeb3b', '#ff6b6b', '#b20000']
+            # --- PLANTILLA TIPO ARCGIS (Tonos YlOrRd aplicados a tus rangos) ---
+            levels = [0.0, 1.0, 11.0, 30.0, 61.0, 100.0]
+            # Tonos extraídos de la plantilla manual: Amarillo Claro, Amarillo-Naranja, Naranja, Rojo, Rojo Oscuro
+            colors = ['#ffffcc', '#fed976', '#fd8d3c', '#e31a1c', '#800026']
             
             cmap = mcolors.ListedColormap(colors)
             norm = mcolors.BoundaryNorm(levels, cmap.N)
 
-            # --- RENDERIZADO DEL MAPA ---
-            fig, ax = plt.subplots(figsize=(12, 8.5), dpi=300)
+            fig, ax = plt.subplots(figsize=(12, 8), dpi=300)
 
-            # Usamos contourf con norm y cmap para forzar los cortes matemáticos
-            contour = ax.contourf(grid_x, grid_y, grid_z, levels=levels, cmap=cmap, norm=norm, alpha=0.85, zorder=2)
+            # Capa IDW
+            contour = ax.contourf(grid_x, grid_y, grid_z, levels=levels, cmap=cmap, norm=norm, alpha=0.9, zorder=2)
 
-            # Lotes (Bordes)
-            gdf_finca.plot(ax=ax, facecolor="none", edgecolor="black", linewidth=1.1, zorder=3)
+            # Bordes Lotes (Grosor al estilo ArcGIS)
+            gdf_finca.plot(ax=ax, facecolor="none", edgecolor="black", linewidth=1.5, zorder=3)
 
-            # Etiquetas de Nombre de Lotes en el Centro
+            # Nombres de Lotes
             col_lote_nombre = [c for c in gdf_finca.columns if c.upper() in ['CAMPO', 'LOTE', 'CODIGO_CAM', 'NOMBRE']]
             if col_lote_nombre:
                 for _, row in gdf_finca.iterrows():
@@ -175,34 +160,34 @@ if file_csv and file_geojson:
                             bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.6, edgecolor='none'),
                             zorder=5)
 
-            # Puntos Muestreados Reales
-            ax.scatter(x, y, c='blue', edgecolors='white', linewidth=0.7, s=45, zorder=6)
+            # Puntos de Muestreo (Punto azul con borde blanco)
+            ax.scatter(x, y, c='blue', edgecolors='white', linewidth=1.0, s=50, zorder=6)
 
-            # Encuadre y márgenes
             ax.set_xlim(xmin - dx, xmax + dx)
             ax.set_ylim(ymin - dy, ymax + dy)
-
-            # Leyenda Discreta
-            legend_patches = [
-                mpatches.Patch(color='#1f77b4', label='0% - Nulo'),
-                mpatches.Patch(color='#2ca02c', label='1 - 10% - Leve'),
-                mpatches.Patch(color='#ffeb3b', label='11 - 29% - Medio'),
-                mpatches.Patch(color='#ff6b6b', label='30 - 60% - Alto'),
-                mpatches.Patch(color='#b20000', label='61 - 100% - Muy Alto'),
-                plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='blue', markeredgecolor='white', markersize=8, label='Puntos Muestreo')
-            ]
-            ax.legend(handles=legend_patches, loc='upper left', bbox_to_anchor=(1.02, 1), frameon=True, facecolor='white', title="Severidad IDW", title_fontsize='10')
-
-            # Título dinámico
-            ax.set_title(f"MAPA DE INTERPOLACIÓN IDW - COCHINILLA\n{var_label.upper()} | FINCA: {str(finca_sel).upper()}\n[{desc_texto}]", fontsize=11, fontweight='bold', pad=12)
             ax.axis('off')
+
+            # --- BARRA DE COLORES LATERAL (Estilo ArcGIS) ---
+            cbar = fig.colorbar(contour, ax=ax, fraction=0.03, pad=0.02)
+            cbar.set_label(f'{var_label} (%)', rotation=90, fontsize=12, fontweight='bold', labelpad=15)
+            # Etiquetas exactas de tus rangos en la barra
+            cbar.set_ticks([0, 1, 11, 30, 61, 100])
+            cbar.set_ticklabels(['0', '1', '11', '30', '61', '100'])
+            cbar.ax.tick_params(labelsize=10)
+
+            # --- LEYENDA INFERIOR DERECHA (Puntos) ---
+            point_legend = [plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='blue', markeredgecolor='white', markersize=9, label='Puntos de Muestreo')]
+            ax.legend(handles=point_legend, loc='lower right', frameon=True, framealpha=1, facecolor='white', edgecolor='lightgray', fontsize=10, borderpad=0.8)
+
+            # Título superior
+            titulo = f"MAPA DE INTERPOLACIÓN IDW - COCHINILLA\n{var_label.upper()} | FINCA: {str(finca_sel).upper()}\n[{desc_texto}]"
+            ax.set_title(titulo, fontsize=14, fontweight='bold', pad=15)
 
             col_map, col_stats = st.columns([3, 1])
 
             with col_map:
                 st.pyplot(fig)
 
-                # Exportación a PDF
                 pdf_buffer = io.BytesIO()
                 fig.savefig(pdf_buffer, format='pdf', bbox_inches='tight')
                 pdf_buffer.seek(0)
