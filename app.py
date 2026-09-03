@@ -75,16 +75,16 @@ if file_csv and file_geojson:
             if df_finca[c].dtype == object:
                 df_finca[c] = df_finca[c].astype(str).str.replace(',', '.')
 
-        # Detección inteligente de coordenadas
+        # Detección inteligente de coordenadas latitud/longitud
         col_lat, col_lon = None, None
         for col in df_finca.columns:
             try:
                 temp_vals = pd.to_numeric(df_finca[col], errors='coerce').dropna()
                 if not temp_vals.empty:
                     mean_val = temp_vals.mean()
-                    if 10 < mean_val < 16:  # Rango de Latitud Nicaragua
+                    if 10 < mean_val < 16:
                         col_lat = col
-                    elif -90 < mean_val < -80: # Rango de Longitud Nicaragua
+                    elif -90 < mean_val < -80:
                         col_lon = col
             except:
                 pass
@@ -133,55 +133,65 @@ if file_csv and file_geojson:
             zi[~mask] = np.nan
             grid_z = zi.reshape(grid_x.shape)
 
-            # --- PLANTILLA TIPO ARCGIS (Tonos YlOrRd aplicados a tus rangos) ---
-            levels = [0.0, 1.0, 11.0, 30.0, 61.0, 100.0]
-            # Tonos extraídos de la plantilla manual: Amarillo Claro, Amarillo-Naranja, Naranja, Rojo, Rojo Oscuro
-            colors = ['#ffffcc', '#fed976', '#fd8d3c', '#e31a1c', '#800026']
+            # --- PALETA Y RANGOS EXACTOS DE ARCGIS ---
+            levels = [0.0, 10.1, 20.1, 29.1, 40.1, 101.0]
+            # Verde Oscuro, Verde Claro, Amarillo, Rojo, Rojo Oscuro
+            colors = ['#2e7d32', '#8bc34a', '#ffeb3b', '#f44336', '#800000']
             
             cmap = mcolors.ListedColormap(colors)
             norm = mcolors.BoundaryNorm(levels, cmap.N)
 
-            fig, ax = plt.subplots(figsize=(12, 8), dpi=300)
+            fig, ax = plt.subplots(figsize=(12, 8.5), dpi=300)
 
-            # Capa IDW
+            # Capa de Interpolación IDW
             contour = ax.contourf(grid_x, grid_y, grid_z, levels=levels, cmap=cmap, norm=norm, alpha=0.9, zorder=2)
 
-            # Bordes Lotes (Grosor al estilo ArcGIS)
-            gdf_finca.plot(ax=ax, facecolor="none", edgecolor="black", linewidth=1.5, zorder=3)
+            # Bordes de Lotes (Estilo ArcGIS)
+            gdf_finca.plot(ax=ax, facecolor="none", edgecolor="black", linewidth=1.2, zorder=3)
 
-            # Nombres de Lotes
+            # Etiquetas de Nombre de Lotes
             col_lote_nombre = [c for c in gdf_finca.columns if c.upper() in ['CAMPO', 'LOTE', 'CODIGO_CAM', 'NOMBRE']]
             if col_lote_nombre:
                 for _, row in gdf_finca.iterrows():
                     centroid = row.geometry.centroid
                     nombre_lote = str(row[col_lote_nombre[0]])
-                    ax.text(centroid.x, centroid.y, nombre_lote, fontsize=8.5, fontweight='bold',
+                    ax.text(centroid.x, centroid.y, nombre_lote, fontsize=8, fontweight='bold',
                             ha='center', va='center', color='black',
-                            bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.6, edgecolor='none'),
-                            zorder=5)
+                            bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7, edgecolor='none'),
+                            zorder=4)
 
-            # Puntos de Muestreo (Punto azul con borde blanco)
-            ax.scatter(x, y, c='blue', edgecolors='white', linewidth=1.0, s=50, zorder=6)
+            # --- PUNTOS DE MONITOREO Y VALORES EN % (ESTILO ARCGIS) ---
+            # Dibujar punto central café con borde oscuro
+            ax.scatter(x, y, c='#5d4037', edgecolors='black', linewidth=0.8, s=35, zorder=6)
+
+            # Etiquetas con el valor porcentual sobre cada punto
+            for px, py, pz in zip(x, y, z):
+                val_text = f"{int(round(pz))}%"
+                ax.text(px + (xmax - xmin)*0.012, py + (ymax - ymin)*0.012, val_text,
+                        fontsize=8.5, fontweight='bold', color='black',
+                        bbox=dict(boxstyle='round,pad=0.25', facecolor='white', edgecolor='gray', linewidth=0.8),
+                        zorder=7)
 
             ax.set_xlim(xmin - dx, xmax + dx)
             ax.set_ylim(ymin - dy, ymax + dy)
             ax.axis('off')
 
-            # --- BARRA DE COLORES LATERAL (Estilo ArcGIS) ---
-            cbar = fig.colorbar(contour, ax=ax, fraction=0.03, pad=0.02)
-            cbar.set_label(f'{var_label} (%)', rotation=90, fontsize=12, fontweight='bold', labelpad=15)
-            # Etiquetas exactas de tus rangos en la barra
-            cbar.set_ticks([0, 1, 11, 30, 61, 100])
-            cbar.set_ticklabels(['0', '1', '11', '30', '61', '100'])
-            cbar.ax.tick_params(labelsize=10)
+            # --- LEYENDA ESTILO ARCGIS ---
+            legend_patches = [
+                mpatches.Patch(color='#2e7d32', label='0% - 10%'),
+                mpatches.Patch(color='#8bc34a', label='11% - 20%'),
+                mpatches.Patch(color='#ffeb3b', label='21% - 29%'),
+                mpatches.Patch(color='#f44336', label='30% - 40%'),
+                mpatches.Patch(color='#800000', label='41% - 100%'),
+                plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#5d4037', markeredgecolor='black', markersize=7, label='Puntos de Muestreo')
+            ]
+            ax.legend(handles=legend_patches, loc='lower right', frameon=True, framealpha=0.95, 
+                      facecolor='white', edgecolor='black', title="INFESTACION DE BROTES\n<RANGOS>", 
+                      title_fontsize='9', fontsize=8.5)
 
-            # --- LEYENDA INFERIOR DERECHA (Puntos) ---
-            point_legend = [plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='blue', markeredgecolor='white', markersize=9, label='Puntos de Muestreo')]
-            ax.legend(handles=point_legend, loc='lower right', frameon=True, framealpha=1, facecolor='white', edgecolor='lightgray', fontsize=10, borderpad=0.8)
-
-            # Título superior
-            titulo = f"MAPA DE INTERPOLACIÓN IDW - COCHINILLA\n{var_label.upper()} | FINCA: {str(finca_sel).upper()}\n[{desc_texto}]"
-            ax.set_title(titulo, fontsize=14, fontweight='bold', pad=15)
+            # Título principal
+            ax.set_title(f"MAPA DE INTERPOLACIÓN IDW - COCHINILLA\n{var_label.upper()} | FINCA: {str(finca_sel).upper()}\n[{desc_texto}]", 
+                         fontsize=12, fontweight='bold', pad=15)
 
             col_map, col_stats = st.columns([3, 1])
 
