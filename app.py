@@ -3,7 +3,6 @@ import geopandas as gpd
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
 import matplotlib.patches as mpatches
 from scipy.spatial import distance
 from shapely.vectorized import contains
@@ -135,17 +134,18 @@ if file_csv and file_geojson:
             zi[~mask] = np.nan
             grid_z = zi.reshape(grid_x.shape)
 
-            # Niveles Discretos Ajustados
-            levels = [0.0, 1.0, 11.0, 30.0, 61.0, 100.0]
-            colors = ['#1f77b4', '#2ca02c', '#ff7f0e', '#ff6b6b', '#b20000']
-            cmap = mcolors.ListedColormap(colors)
-            norm = mcolors.BoundaryNorm(levels, cmap.N)
+            # --- CORRECCIÓN DE LA PALETA DE COLORES ---
+            # Definimos los cortes exactos (añadiendo márgenes ligeros para asegurar que el 0 y 100 entren bien)
+            levels = [-0.1, 1.0, 11.0, 30.0, 61.0, 101.0]
+            
+            # Azul, Verde, Amarillo, Rojo Claro, Rojo Intenso
+            colors = ['#1f77b4', '#2ca02c', '#ffeb3b', '#ff6b6b', '#b20000']
 
             # Gráfico
             fig, ax = plt.subplots(figsize=(11, 8.5), dpi=300)
 
-            # Capa IDW
-            contour = ax.contourf(grid_x, grid_y, grid_z, levels=levels, cmap=cmap, norm=norm, alpha=0.85, zorder=2)
+            # Capa IDW: Pasamos 'colors' directamente en lugar de cmap/norm para forzar los límites exactos
+            contour = ax.contourf(grid_x, grid_y, grid_z, levels=levels, colors=colors, alpha=0.85, zorder=2)
 
             # Capa Lotes Vectoriales
             gdf_finca.plot(ax=ax, facecolor="none", edgecolor="black", linewidth=1.1, zorder=3)
@@ -168,11 +168,11 @@ if file_csv and file_geojson:
             ax.set_xlim(xmin - dx, xmax + dx)
             ax.set_ylim(ymin - dy, ymax + dy)
 
-            # Leyenda Fuera del Mapa (evita tapar lotes)
+            # Leyenda Fuera del Mapa
             legend_patches = [
                 mpatches.Patch(color='#1f77b4', label='0% - Nulo'),
                 mpatches.Patch(color='#2ca02c', label='1 - 10% - Leve'),
-                mpatches.Patch(color='#ff7f0e', label='11 - 29% - Medio'),
+                mpatches.Patch(color='#ffeb3b', label='11 - 29% - Medio'),
                 mpatches.Patch(color='#ff6b6b', label='30 - 60% - Alto'),
                 mpatches.Patch(color='#b20000', label='61 - 100% - Muy Alto'),
                 plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='blue', markeredgecolor='white', markersize=8, label='Puntos Muestreo')
