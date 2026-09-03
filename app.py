@@ -11,13 +11,13 @@ st.set_page_config(page_title="Generador IDW Cochinilla", layout="wide", initial
 st.title("🐛 Generador de Mapas de Infestación por IDW")
 st.markdown("Cargue los datos de muestreo de AppSheet y la capa de lotes para calcular el mapa de calor de cochinilla.")
 
-# --- BARRA LATERAL: CARGA DE ARCHIVOS Y CONTROLES ---
+# --- BARRA LATERAL: CARGA DE ARCHIVOS ---
 st.sidebar.header("1. Carga de Datos")
 
 file_csv = st.sidebar.file_uploader("Subir Muestreo AppSheet (CSV)", type=["csv"])
 file_geojson = st.sidebar.file_uploader("Subir Lotes Finca (GeoJSON/KML)", type=["geojson", "kml", "json"])
 
-# --- FUNCION INTERPOLACIÓN IDW ---
+# --- FUNCIÓN INTERPOLACIÓN IDW ---
 def idw_interpolation(x, y, z, xi, yi, power=2):
     dist = distance.cdist(np.column_stack((xi, yi)), np.column_stack((x, y)))
     dist = np.where(dist == 0, 1e-10, dist)
@@ -28,37 +28,51 @@ def idw_interpolation(x, y, z, xi, yi, power=2):
 
 if file_csv and file_geojson:
     try:
-        # Carga de datos
+        # Cargar archivos
         df_points = pd.read_csv(file_csv)
         gdf_lotes = gpd.read_file(file_geojson)
 
         st.sidebar.header("2. Filtros y Parámetros IDW")
 
-        # Filtro por Finca
-        fincas = df_points['Finca'].unique() if 'Finca' in df_points.columns else ["General"]
-        finca_sel = st.sidebar.selectbox("Seleccione la Finca", fincas)
+        # Filtro por Finca si existe la columna en el CSV
+        if 'FINCA' in df_points.columns:
+            fincas = df_points['FINCA'].dropna().unique()
+            finca_sel = st.sidebar.selectbox("Seleccione la Finca", fincas)
+            df_finca = df_points[df_points['FINCA'] == finca_sel].copy()
+        else:
+            finca_sel = "General"
+            df_finca = df_points.copy()
 
-        # Parámetros del modelo
+        # Selección de Variable a Interpolar
+        opciones_var = []
+        if '% Brotes Infestados' in df_finca.columns:
+            opciones_var.append('% Brotes Infestados')
+        if '% Macollas Infestadas' in df_finca.columns:
+            opciones_var.append('% Macollas Infestadas')
+        
+        col_val = st.sidebar.selectbox("Variable a Interpolar", opciones_var if opciones_var else df_finca.columns)
+
+        # Parámetros del modelo IDW
         power_idw = st.sidebar.slider("Potencia IDW (p)", min_value=1.0, max_value=5.0, value=2.0, step=0.5)
         resolution = st.sidebar.slider("Resolución Malla", min_value=50, max_value=250, value=120)
 
-        # Filtrar DataFrames
-        if 'Finca' in df_points.columns:
-            df_finca = df_points[df_points['Finca'] == finca_sel]
-        else:
-            df_finca = df_points
+        # Asignación de Coordenadas
+        col_lat = 'I'
+        col_lon = 'J'
 
-        if 'Finca' in gdf_lotes.columns:
-            gdf_finca = gdf_lotes[gdf_lotes['Finca'] == finca_sel]
+        # Limpieza de valores con formato de porcentaje (%)
+        if df_finca[col_val].dtype == object:
+            df_finca[col_val] = df_finca[col_val].astype(str).str.rstrip('%').astype('float')
+
+        # Filtrar capa de lotes
+        if 'FINCA' in gdf_lotes.columns and finca_sel != "General":
+            gdf_finca = gdf_lotes[gdf_lotes['FINCA'] == finca_sel]
+        elif 'FINCA' in gdf_lotes.columns and finca_sel != "General":
+            gdf_finca = gdf_lotes[gdf_lotes['FINCA'].str.lower() == str(finca_sel).lower()]
         else:
             gdf_finca = gdf_lotes
 
-        # Identificar columnas
-        col_lat = 'Latitud' if 'Latitud' in df_finca.columns else 'Lat'
-        col_lon = 'Longitud' if 'Longitud' in df_finca.columns else 'Lng'
-        col_val = 'Infestacion' if 'Infestacion' in df_finca.columns else df_finca.columns[-1]
-
-        # --- BOTÓN DE GENERACIÓN ---
+        # --- BOTÓN DE GENERACIÓN DE MAPA ---
         if st.sidebar.button("🚀 Generar Mapa IDW", type="primary"):
             x = df_finca[col_lon].values
             y = df_finca[col_lat].values
@@ -78,26 +92,26 @@ if file_csv and file_geojson:
             zi = idw_interpolation(x, y, z, xi, yi, power=power_idw)
             grid_z = zi.reshape(grid_x.shape)
 
-            # --- DIBUJAR MAPA ---
+            # --- RENDERIZADO DEL MAPA ---
             fig, ax = plt.subplots(figsize=(11, 8.5), dpi=300)
 
             # Capa vectorial lotes
-            gdf_finca.plot(ax=ax, facecolor="none", edgecolor="#333333", linewidth=0.7, zorder=3)
+            gdf_finca.plot(ax=ax, facecolor="none", edgecolor="#333333", linewidth=0.8, zorder=3)
 
-            # Capa IDW
+            # Capa de calor IDW
             contour = ax.contourf(grid_x, grid_y, grid_z, levels=15, cmap="YlOrRd", alpha=0.75, zorder=2)
             cbar = plt.colorbar(contour, ax=ax, shrink=0.75)
-            cbar.set_label("% Infestación Cochinilla", fontsize=10, fontweight='bold')
+            cbar.set_label(f"{col_val} (%)", fontsize=10, fontweight='bold')
 
             # Puntos de Muestreo
-            ax.scatter(x, y, c='black', s=12, label='Puntos Muestreados', zorder=4)
+            ax.scatter(x, y, c='blue', edgecolors='white', linewidth=0.5, s=25, label='Puntos Muestreados', zorder=4)
 
-            # Rotulado
+            # Título y formato
             ax.set_title(f"MAPA DE INTERPOLACIÓN IDW - INFESTACIÓN DE COCHINILLA\nFINCA: {str(finca_sel).upper()}", fontsize=12, fontweight='bold', pad=12)
             ax.axis('off')
             ax.legend(loc='lower right')
 
-            # Renderizado
+            # Columnas de salida
             col_map, col_stats = st.columns([3, 1])
 
             with col_map:
