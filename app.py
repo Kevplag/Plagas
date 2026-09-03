@@ -28,57 +28,79 @@ def idw_interpolation(x, y, z, xi, yi, power=2):
 
 if file_csv and file_geojson:
     try:
-        # Cargar archivos
-        df_points = pd.read_csv(file_csv)
+        # CORRECCIÓN DE SEPARADOR CSV (Soporta punto y coma o coma)
+        try:
+            df_points = pd.read_csv(file_csv, sep=';')
+            if len(df_points.columns) <= 1:
+                file_csv.seek(0)
+                df_points = pd.read_csv(file_csv, sep=',')
+        except Exception:
+            file_csv.seek(0)
+            df_points = pd.read_csv(file_csv, sep=',')
+
         gdf_lotes = gpd.read_file(file_geojson)
+
+        # Limpieza de nombres de columnas (elimina espacios extras)
+        df_points.columns = df_points.columns.str.strip()
 
         st.sidebar.header("2. Filtros y Parámetros IDW")
 
-        # Filtro por Finca si existe la columna en el CSV
-        if 'FINCA' in df_points.columns:
-            fincas = df_points['FINCA'].dropna().unique()
+        # Filtro por Finca
+        col_finca = [c for c in df_points.columns if 'FINCA' in c.upper()]
+        if col_finca:
+            fincas = df_points[col_finca[0]].dropna().unique()
             finca_sel = st.sidebar.selectbox("Seleccione la Finca", fincas)
-            df_finca = df_points[df_points['FINCA'] == finca_sel].copy()
+            df_finca = df_points[df_points[col_finca[0]] == finca_sel].copy()
         else:
             finca_sel = "General"
             df_finca = df_points.copy()
 
-        # Selección de Variable a Interpolar
-        opciones_var = []
-        if '% Brotes Infestados' in df_finca.columns:
-            opciones_var.append('% Brotes Infestados')
-        if '% Macollas Infestadas' in df_finca.columns:
-            opciones_var.append('% Macollas Infestadas')
-        
-        col_val = st.sidebar.selectbox("Variable a Interpolar", opciones_var if opciones_var else df_finca.columns)
+        # DETECCIÓN DE VARIABLES DE INFESTACIÓN
+        col_brotes = [c for c in df_finca.columns if 'BROTE' in c.upper() or 'BROTES' in c.upper()]
+        col_macollas = [c for c in df_finca.columns if 'MACOLLA' in c.upper() or 'MACOLLAS' in c.upper()]
+
+        dict_opciones = {}
+        if col_brotes:
+            dict_opciones["% Brotes Infestados"] = col_brotes[0]
+        if col_macollas:
+            dict_opciones["% Macollas Infestadas"] = col_macollas[0]
+
+        if not dict_opciones:
+            # Fallback en caso de nombres no estándar
+            dict_opciones = {c: c for c in df_finca.columns if c not in ['ID', 'NUMERO', 'FECHA', 'I', 'J', 'X', 'Y']}
+
+        var_label = st.sidebar.selectbox("Variable a Interpolar", list(dict_opciones.keys()))
+        col_val = dict_opciones[var_label]
 
         # Parámetros del modelo IDW
         power_idw = st.sidebar.slider("Potencia IDW (p)", min_value=1.0, max_value=5.0, value=2.0, step=0.5)
         resolution = st.sidebar.slider("Resolución Malla", min_value=50, max_value=250, value=120)
 
-        # Asignación de Coordenadas
-        col_lat = 'I'
-        col_lon = 'J'
+        # Identificar coordenadas Lat/Lon (I/J o X/Y)
+        col_lat = 'I' if 'I' in df_finca.columns else ('Y' if 'Y' in df_finca.columns else 'Latitud')
+        col_lon = 'J' if 'J' in df_finca.columns else ('X' if 'X' in df_finca.columns else 'Longitud')
 
-        # Limpieza de valores con formato de porcentaje (%)
+        # Limpieza de valores con signo % a float
         if df_finca[col_val].dtype == object:
             df_finca[col_val] = df_finca[col_val].astype(str).str.rstrip('%').astype('float')
 
-        # Filtrar capa de lotes
-        if 'FINCA' in gdf_lotes.columns and finca_sel != "General":
-            gdf_finca = gdf_lotes[gdf_lotes['FINCA'] == finca_sel]
-        elif 'FINCA' in gdf_lotes.columns and finca_sel != "General":
-            gdf_finca = gdf_lotes[gdf_lotes['FINCA'].str.lower() == str(finca_sel).lower()]
+        # Filtrar capa de lotes por finca si aplica
+        col_finca_geo = [c for c in gdf_lotes.columns if 'FINCA' in c.upper()]
+        if col_finca_geo and finca_sel != "General":
+            gdf_finca = gdf_lotes[gdf_lotes[col_finca_geo[0]].astype(str).str.lower() == str(finca_sel).lower()]
         else:
             gdf_finca = gdf_lotes
 
-        # --- BOTÓN DE GENERACIÓN DE MAPA ---
+        if gdf_finca.empty:
+            gdf_finca = gdf_lotes
+
+        # --- BOTÓN DE GENERACIÓN ---
         if st.sidebar.button("🚀 Generar Mapa IDW", type="primary"):
             x = df_finca[col_lon].values
             y = df_finca[col_lat].values
             z = df_finca[col_val].values
 
-            # Crear Malla de Interpolación
+            # Malla de Interpolación
             xmin, ymin, xmax, ymax = gdf_finca.total_bounds
             grid_x, grid_y = np.meshgrid(
                 np.linspace(xmin, xmax, resolution),
@@ -88,36 +110,36 @@ if file_csv and file_geojson:
             xi = grid_x.flatten()
             yi = grid_y.flatten()
 
-            # Ejecutar IDW
+            # Cálculo IDW
             zi = idw_interpolation(x, y, z, xi, yi, power=power_idw)
             grid_z = zi.reshape(grid_x.shape)
 
-            # --- RENDERIZADO DEL MAPA ---
+            # RENDERIZADO DEL MAPA
             fig, ax = plt.subplots(figsize=(11, 8.5), dpi=300)
 
             # Capa vectorial lotes
             gdf_finca.plot(ax=ax, facecolor="none", edgecolor="#333333", linewidth=0.8, zorder=3)
 
-            # Capa de calor IDW
+            # Capa IDW
             contour = ax.contourf(grid_x, grid_y, grid_z, levels=15, cmap="YlOrRd", alpha=0.75, zorder=2)
             cbar = plt.colorbar(contour, ax=ax, shrink=0.75)
-            cbar.set_label(f"{col_val} (%)", fontsize=10, fontweight='bold')
+            cbar.set_label(f"{var_label} (%)", fontsize=10, fontweight='bold')
 
             # Puntos de Muestreo
-            ax.scatter(x, y, c='blue', edgecolors='white', linewidth=0.5, s=25, label='Puntos Muestreados', zorder=4)
+            ax.scatter(x, y, c='blue', edgecolors='white', linewidth=0.5, s=30, label='Estaciones de Muestreo', zorder=4)
 
-            # Título y formato
-            ax.set_title(f"MAPA DE INTERPOLACIÓN IDW - INFESTACIÓN DE COCHINILLA\nFINCA: {str(finca_sel).upper()}", fontsize=12, fontweight='bold', pad=12)
+            # Título
+            ax.set_title(f"MAPA DE INTERPOLACIÓN IDW - COCHINILLA\n{var_label.upper()} | FINCA: {str(finca_sel).upper()}", fontsize=12, fontweight='bold', pad=12)
             ax.axis('off')
             ax.legend(loc='lower right')
 
-            # Columnas de salida
+            # Layout de resultados
             col_map, col_stats = st.columns([3, 1])
 
             with col_map:
                 st.pyplot(fig)
 
-                # Exportar PDF
+                # Exportación a PDF
                 pdf_buffer = io.BytesIO()
                 fig.savefig(pdf_buffer, format='pdf', bbox_inches='tight')
                 pdf_buffer.seek(0)
@@ -125,7 +147,7 @@ if file_csv and file_geojson:
                 st.download_button(
                     label="📄 Descargar Mapa en PDF",
                     data=pdf_buffer,
-                    file_name=f"Mapa_IDW_Cochinilla_{finca_sel}.pdf",
+                    file_name=f"Mapa_IDW_{var_label.replace(' ', '_')}_{finca_sel}.pdf",
                     mime="application/pdf"
                 )
 
