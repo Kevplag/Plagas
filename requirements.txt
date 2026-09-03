@@ -7,3 +7,4 @@ matplotlib
 shapely
 requests
 openpyxl
+rasterio
