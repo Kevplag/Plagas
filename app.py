@@ -3,8 +3,9 @@ import geopandas as gpd
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+import matplotlib.patches as mpatches
 from scipy.spatial import distance
-from shapely.geometry import Point
 from shapely.vectorized import contains
 import io
 
@@ -40,7 +41,7 @@ if file_csv and file_geojson:
             file_csv.seek(0)
             df_points = pd.read_csv(file_csv, sep=',')
 
-        # Lectura GeoJSON y REPROYECCIÓN OBLIGATORIA A WGS84 (Lat/Lon)
+        # Lectura GeoJSON y REPROYECCIÓN A WGS84
         gdf_lotes = gpd.read_file(file_geojson)
         if gdf_lotes.crs is not None and gdf_lotes.crs.to_string() != "EPSG:4326":
             gdf_lotes = gdf_lotes.to_crs(epsg=4326)
@@ -82,7 +83,7 @@ if file_csv and file_geojson:
         power_idw = st.sidebar.slider("Potencia IDW (p)", min_value=1.0, max_value=5.0, value=2.0, step=0.5)
         resolution = st.sidebar.slider("Resolución Malla", min_value=50, max_value=250, value=150)
 
-        # Asignación de Coordenadas (I/J o Y/X)
+        # Asignación de Coordenadas
         col_lat = 'I' if 'I' in df_finca.columns else ('Y' if 'Y' in df_finca.columns else 'Latitud')
         col_lon = 'J' if 'J' in df_finca.columns else ('X' if 'X' in df_finca.columns else 'Longitud')
 
@@ -110,10 +111,8 @@ if file_csv and file_geojson:
             y = df_finca[col_lat].to_numpy(dtype=float)
             z = df_finca[col_val].to_numpy(dtype=float)
 
-            # Malla acotada al encuadre de los lotes
+            # Malla acotada
             xmin, ymin, xmax, ymax = gdf_finca.total_bounds
-            
-            # Margen leve del 2%
             dx = (xmax - xmin) * 0.02
             dy = (ymax - ymin) * 0.02
             grid_x, grid_y = np.meshgrid(
@@ -127,36 +126,56 @@ if file_csv and file_geojson:
             # Interpolación IDW
             zi = idw_interpolation(x, y, z, xi, yi, power=power_idw)
 
-            # MÁSCARA VECTORIAL (Recortar IDW estrictamente dentro de los lotes)
+            # Máscara dentro de polígonos
             union_poly = gdf_finca.geometry.unary_union
             mask = contains(union_poly, xi, yi)
             zi[~mask] = np.nan
             grid_z = zi.reshape(grid_x.shape)
 
-            # RENDERIZADO DEL MAPA
+            # --- CONFIGURACIÓN DE PALETA DISCRETA PERSONALIZADA ---
+            levels = [-0.1, 0.0, 10.0, 29.0, 60.0, 100.0]
+            colors = [
+                '#1f77b4',  # 0% - Nulo (Azul)
+                '#2ca02c',  # 1 - 10% - Leve (Verde)
+                '#ff7f0e',  # 11 - 29% - Medio (Amarillo/Naranja)
+                '#ff6b6b',  # 30 - 60% - Alto (Rojo claro)
+                '#b20000'   # 61 - 100% - Muy Alto (Rojo intenso)
+            ]
+            cmap = mcolors.ListedColormap(colors)
+            norm = mcolors.BoundaryNorm(levels, cmap.N)
+
+            # RENDERIZADO
             fig, ax = plt.subplots(figsize=(10, 8), dpi=300)
 
-            # Capa de Calor Recortada
-            contour = ax.contourf(grid_x, grid_y, grid_z, levels=15, cmap="YlOrRd", alpha=0.85, zorder=2)
-            cbar = plt.colorbar(contour, ax=ax, shrink=0.75, pad=0.03)
-            cbar.set_label(f"{var_label} (%)", fontsize=10, fontweight='bold')
+            # Capa IDW Categórica
+            contour = ax.contourf(grid_x, grid_y, grid_z, levels=levels, cmap=cmap, norm=norm, alpha=0.85, zorder=2)
 
-            # Capa Vectorial Lotes (Bordes)
+            # Capa Vectorial Lotes
             gdf_finca.plot(ax=ax, facecolor="none", edgecolor="black", linewidth=1.0, zorder=3)
 
             # Puntos de Muestreo
-            ax.scatter(x, y, c='blue', edgecolors='white', linewidth=0.6, s=40, label='Puntos de Muestreo', zorder=4)
+            ax.scatter(x, y, c='blue', edgecolors='white', linewidth=0.6, s=40, zorder=4)
 
-            # Ajustar límites de visualización al bounding box real
+            # Ajuste de encuadre
             ax.set_xlim(xmin - dx, xmax + dx)
             ax.set_ylim(ymin - dy, ymax + dy)
 
-            # Título y Formato
+            # LEYENDA PERSONALIZADA CATEGÓRICA
+            legend_patches = [
+                mpatches.Patch(color='#1f77b4', label='0% - Nulo'),
+                mpatches.Patch(color='#2ca02c', label='1 - 10% - Leve'),
+                mpatches.Patch(color='#ff7f0e', label='11 - 29% - Medio'),
+                mpatches.Patch(color='#ff6b6b', label='30 - 60% - Alto'),
+                mpatches.Patch(color='#b20000', label='61 - 100% - Muy Alto'),
+                plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='blue', markeredgecolor='white', markersize=8, label='Estaciones de Muestreo')
+            ]
+            ax.legend(handles=legend_patches, loc='lower right', frameon=True, facecolor='white', title="Severidad", title_fontsize='10', fontsize='9')
+
+            # Título
             ax.set_title(f"MAPA DE INTERPOLACIÓN IDW - COCHINILLA\n{var_label.upper()} | FINCA: {str(finca_sel).upper()}", fontsize=11, fontweight='bold', pad=12)
             ax.axis('off')
-            ax.legend(loc='lower right', frameon=True, facecolor='white')
 
-            # Layout de Resultados
+            # Resultados
             col_map, col_stats = st.columns([3, 1])
 
             with col_map:
