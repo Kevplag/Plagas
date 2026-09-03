@@ -8,11 +8,13 @@ import matplotlib.patches as mpatches
 from scipy.spatial import distance
 from shapely.vectorized import contains
 import io
+import rasterio
+from rasterio.transform import from_bounds
 
 st.set_page_config(page_title="Generador IDW Cochinilla", layout="wide", initial_sidebar_state="expanded")
 
 st.title("🐛 Generador de Mapas de Infestación por IDW")
-st.markdown("Cargue los datos de muestreo de AppSheet y la capa de lotes para calcular el mapa de calor de cochinilla.")
+st.markdown("Cargue los datos de muestreo de AppSheet y la capa de lotes para calcular el mapa de calor georreferenciado.")
 
 # --- BARRA LATERAL: CARGA DE ARCHIVOS ---
 st.sidebar.header("1. Carga de Datos")
@@ -69,13 +71,13 @@ if file_csv and file_geojson:
         col_val = dict_opciones[var_label]
 
         power_idw = st.sidebar.slider("Potencia IDW (p)", min_value=1.0, max_value=5.0, value=2.0, step=0.5)
-        resolution = st.sidebar.slider("Resolución Malla", min_value=50, max_value=300, value=200)
+        resolution = st.sidebar.slider("Resolución Malla", min_value=100, max_value=500, value=300)
 
         for c in df_finca.columns:
             if df_finca[c].dtype == object:
                 df_finca[c] = df_finca[c].astype(str).str.replace(',', '.')
 
-        # Detección inteligente de coordenadas
+        # Detección inteligente de coordenadas latitud/longitud
         col_lat, col_lon = None, None
         for col in df_finca.columns:
             try:
@@ -117,13 +119,12 @@ if file_csv and file_geojson:
             z = df_finca[col_val].to_numpy(dtype=float)
 
             xmin, ymin, xmax, ymax = gdf_finca.total_bounds
-            # Expandir el margen derecho para dar espacio a la leyenda
             dx = (xmax - xmin) * 0.05
             dy = (ymax - ymin) * 0.05
-            grid_x, grid_y = np.meshgrid(
-                np.linspace(xmin - dx, xmax + dx, resolution),
-                np.linspace(ymin - dy, ymax + dy, resolution)
-            )
+            
+            x_range = np.linspace(xmin - dx, xmax + dx, resolution)
+            y_range = np.linspace(ymin - dy, ymax + dy, resolution)
+            grid_x, grid_y = np.meshgrid(x_range, y_range)
 
             xi = grid_x.flatten()
             yi = grid_y.flatten()
@@ -134,7 +135,7 @@ if file_csv and file_geojson:
             zi[~mask] = np.nan
             grid_z = zi.reshape(grid_x.shape)
 
-            # Paleta y rangos exactos de ArcGIS
+            # --- PALETA Y RANGOS EXACTOS DE ARCGIS ---
             levels = [0.0, 10.1, 20.1, 29.1, 40.1, 101.0]
             colors = ['#2e7d32', '#8bc34a', '#ffeb3b', '#f44336', '#800000']
             
@@ -146,10 +147,10 @@ if file_csv and file_geojson:
             # Interpolación IDW
             contour = ax.contourf(grid_x, grid_y, grid_z, levels=levels, cmap=cmap, norm=norm, alpha=0.9, zorder=2)
 
-            # Capa Lotes
+            # Capa de Lotes
             gdf_finca.plot(ax=ax, facecolor="none", edgecolor="black", linewidth=1.1, zorder=3)
 
-            # Etiquetas de Nombre de Lotes en el centro
+            # Etiquetas de Nombre de Lotes
             col_lote_nombre = [c for c in gdf_finca.columns if c.upper() in ['CAMPO', 'LOTE', 'CODIGO_CAM', 'NOMBRE']]
             if col_lote_nombre:
                 for _, row in gdf_finca.iterrows():
@@ -163,7 +164,7 @@ if file_csv and file_geojson:
             # Puntos de Muestreo
             ax.scatter(x, y, c='#5d4037', edgecolors='black', linewidth=0.8, s=30, zorder=6)
 
-            # Etiquetas del % de Infestación (desplazadas hacia arriba/derecha para no chocar con el lote)
+            # Etiquetas del % de Infestación
             for px, py, pz in zip(x, y, z):
                 val_text = f"{int(round(pz))}%"
                 ax.text(px + (xmax - xmin)*0.018, py + (ymax - ymin)*0.012, val_text,
@@ -175,7 +176,7 @@ if file_csv and file_geojson:
             ax.set_ylim(ymin - dy, ymax + dy)
             ax.axis('off')
 
-            # --- LEYENDA UBICADA FUERA DEL MAPA (A la derecha) ---
+            # Leyenda ubicada a la derecha fuera del mapa
             legend_patches = [
                 mpatches.Patch(color='#2e7d32', label='0% - 10%'),
                 mpatches.Patch(color='#8bc34a', label='11% - 20%'),
@@ -191,21 +192,54 @@ if file_csv and file_geojson:
             ax.set_title(f"MAPA DE INTERPOLACIÓN IDW - COCHINILLA\n{var_label.upper()} | FINCA: {str(finca_sel).upper()}\n[{desc_texto}]", 
                          fontsize=12, fontweight='bold', pad=15)
 
+            # --- GENERACIÓN DEL ARCHIVO GEOTIFF GEORREFERENCIADO (RASTERIO) ---
+            grid_z_flipped = np.flipud(grid_z)
+            transform = from_bounds(xmin - dx, ymin - dy, xmax + dx, ymax + dy, resolution, resolution)
+
+            tif_buffer = io.BytesIO()
+            with rasterio.open(
+                tif_buffer,
+                'w',
+                driver='GTiff',
+                height=resolution,
+                width=resolution,
+                count=1,
+                dtype=rasterio.float32,
+                crs='EPSG:4326',
+                transform=transform,
+                nodata=np.nan
+            ) as dst:
+                dst.write(grid_z_flipped.astype(rasterio.float32), 1)
+
+            tif_buffer.seek(0)
+
+            # --- VISTA Y BOTONES DE DESCARGA EN STREAMLIT ---
             col_map, col_stats = st.columns([3, 1])
 
             with col_map:
                 st.pyplot(fig)
 
-                pdf_buffer = io.BytesIO()
-                fig.savefig(pdf_buffer, format='pdf', bbox_inches='tight')
-                pdf_buffer.seek(0)
+                col_btn1, col_btn2 = st.columns(2)
+                
+                with col_btn1:
+                    pdf_buffer = io.BytesIO()
+                    fig.savefig(pdf_buffer, format='pdf', bbox_inches='tight')
+                    pdf_buffer.seek(0)
+                    st.download_button(
+                        label="📄 Descargar Mapa PDF (Lectura)",
+                        data=pdf_buffer,
+                        file_name=f"Mapa_IDW_{var_label.replace(' ', '_')}_{finca_sel}.pdf",
+                        mime="application/pdf"
+                    )
 
-                st.download_button(
-                    label="📄 Descargar Mapa en PDF",
-                    data=pdf_buffer,
-                    file_name=f"Mapa_IDW_{var_label.replace(' ', '_')}_{finca_sel}.pdf",
-                    mime="application/pdf"
-                )
+                with col_btn2:
+                    st.download_button(
+                        label="🗺️ Descargar GeoTIFF (Avenza Maps)",
+                        data=tif_buffer,
+                        file_name=f"Mapa_IDW_{var_label.replace(' ', '_')}_{finca_sel}.tif",
+                        mime="image/tiff",
+                        type="primary"
+                    )
 
             with col_stats:
                 st.subheader("📊 Resumen")
