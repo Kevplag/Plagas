@@ -7,14 +7,18 @@ import matplotlib.colors as mcolors
 import matplotlib.patches as mpatches
 from scipy.spatial import distance
 from shapely.vectorized import contains
-from shapely.geometry import shape
 import io
+import rasterio
+from rasterio.transform import from_bounds
 
 st.set_page_config(page_title="Generador IDW Cochinilla", layout="wide", initial_sidebar_state="expanded")
 
 st.title("🐛 Generador de Mapas de Infestación por IDW")
+st.markdown("Cargue los datos de muestreo de AppSheet y la capa de lotes para calcular el mapa de calor georreferenciado.")
 
 # --- BARRA LATERAL: CARGA DE ARCHIVOS ---
+st.sidebar.header("1. Carga de Datos")
+
 file_csv = st.sidebar.file_uploader("Subir Muestreo AppSheet (CSV)", type=["csv"])
 file_geojson = st.sidebar.file_uploader("Subir Lotes Finca (GeoJSON/KML)", type=["geojson", "kml", "json"])
 
@@ -45,9 +49,16 @@ if file_csv and file_geojson:
 
         df_points.columns = df_points.columns.str.strip()
 
+        st.sidebar.header("2. Filtros y Parámetros IDW")
+
         col_finca = [c for c in df_points.columns if 'FINCA' in c.upper()]
-        finca_sel = df_points[col_finca[0]].dropna().unique()[0] if col_finca else "General"
-        df_finca = df_points[df_points[col_finca[0]] == finca_sel].copy() if col_finca else df_points.copy()
+        if col_finca:
+            fincas = df_points[col_finca[0]].dropna().unique()
+            finca_sel = st.sidebar.selectbox("Seleccione la Finca", fincas)
+            df_finca = df_points[df_points[col_finca[0]] == finca_sel].copy()
+        else:
+            finca_sel = "General"
+            df_finca = df_points.copy()
 
         col_brotes = [c for c in df_finca.columns if 'BROTE' in c.upper()]
         col_macollas = [c for c in df_finca.columns if 'MACOLLA' in c.upper()]
@@ -60,21 +71,48 @@ if file_csv and file_geojson:
         col_val = dict_opciones[var_label]
 
         power_idw = st.sidebar.slider("Potencia IDW (p)", min_value=1.0, max_value=5.0, value=2.0, step=0.5)
-        resolution = st.sidebar.slider("Resolución Malla", min_value=100, max_value=300, value=150)
+        resolution = st.sidebar.slider("Resolución Malla", min_value=100, max_value=500, value=300)
 
         for c in df_finca.columns:
             if df_finca[c].dtype == object:
                 df_finca[c] = df_finca[c].astype(str).str.replace(',', '.')
 
-        col_lat = 'Y' if 'Y' in df_finca.columns else 'Latitud'
-        col_lon = 'X' if 'X' in df_finca.columns else 'Longitud'
+        # Detección inteligente de coordenadas latitud/longitud
+        col_lat, col_lon = None, None
+        for col in df_finca.columns:
+            try:
+                temp_vals = pd.to_numeric(df_finca[col], errors='coerce').dropna()
+                if not temp_vals.empty:
+                    mean_val = temp_vals.mean()
+                    if 10 < mean_val < 16:
+                        col_lat = col
+                    elif -90 < mean_val < -80:
+                        col_lon = col
+            except:
+                pass
+        
+        if not col_lat: col_lat = 'Y' if 'Y' in df_finca.columns else 'Latitud'
+        if not col_lon: col_lon = 'X' if 'X' in df_finca.columns else 'Longitud'
 
         df_finca[col_val] = df_finca[col_val].astype(str).str.rstrip('%')
         df_finca[col_val] = pd.to_numeric(df_finca[col_val], errors='coerce')
+        if df_finca[col_val].max() <= 1.0 and df_finca[col_val].max() > 0:
+            df_finca[col_val] = df_finca[col_val] * 100.0
+
         df_finca = df_finca.dropna(subset=[col_lat, col_lon, col_val])
 
-        gdf_finca = gdf_lotes
+        col_desc = [c for c in df_finca.columns if 'MUESTREO_DESCRIPCION' in c.upper() or 'MUESTREO' in c.upper()]
+        desc_texto = df_finca[col_desc[0]].iloc[0] if col_desc else "MUESTREO DE CAMPO"
 
+        col_finca_geo = [c for c in gdf_lotes.columns if 'FINCA' in c.upper() or 'CAMPO' in c.upper()]
+        if col_finca_geo and finca_sel != "General":
+            gdf_finca = gdf_lotes[gdf_lotes[col_finca_geo[0]].astype(str).str.lower() == str(finca_sel).lower()]
+        else:
+            gdf_finca = gdf_lotes
+
+        if gdf_finca.empty: gdf_finca = gdf_lotes
+
+        # --- BOTÓN DE GENERACIÓN ---
         if st.sidebar.button("🚀 Generar Mapa IDW", type="primary"):
             x = df_finca[col_lon].to_numpy(dtype=float)
             y = df_finca[col_lat].to_numpy(dtype=float)
@@ -83,7 +121,7 @@ if file_csv and file_geojson:
             xmin, ymin, xmax, ymax = gdf_finca.total_bounds
             dx = (xmax - xmin) * 0.05
             dy = (ymax - ymin) * 0.05
-
+            
             x_range = np.linspace(xmin - dx, xmax + dx, resolution)
             y_range = np.linspace(ymin - dy, ymax + dy, resolution)
             grid_x, grid_y = np.meshgrid(x_range, y_range)
@@ -97,55 +135,120 @@ if file_csv and file_geojson:
             zi[~mask] = np.nan
             grid_z = zi.reshape(grid_x.shape)
 
+            # --- PALETA Y RANGOS EXACTOS DE ARCGIS ---
             levels = [0.0, 10.1, 20.1, 29.1, 40.1, 101.0]
             colors = ['#2e7d32', '#8bc34a', '#ffeb3b', '#f44336', '#800000']
+            
             cmap = mcolors.ListedColormap(colors)
             norm = mcolors.BoundaryNorm(levels, cmap.N)
 
-            fig, ax = plt.subplots(figsize=(12, 8), dpi=300)
-            contour = ax.contourf(grid_x, grid_y, grid_z, levels=levels, cmap=cmap, norm=norm, alpha=0.9)
-            gdf_finca.plot(ax=ax, facecolor="none", edgecolor="black", linewidth=1.1)
+            fig, ax = plt.subplots(figsize=(13, 8.5), dpi=300)
+
+            # Interpolación IDW
+            contour = ax.contourf(grid_x, grid_y, grid_z, levels=levels, cmap=cmap, norm=norm, alpha=0.9, zorder=2)
+
+            # Capa de Lotes
+            gdf_finca.plot(ax=ax, facecolor="none", edgecolor="black", linewidth=1.1, zorder=3)
+
+            # Etiquetas de Nombre de Lotes
+            col_lote_nombre = [c for c in gdf_finca.columns if c.upper() in ['CAMPO', 'LOTE', 'CODIGO_CAM', 'NOMBRE']]
+            if col_lote_nombre:
+                for _, row in gdf_finca.iterrows():
+                    centroid = row.geometry.centroid
+                    nombre_lote = str(row[col_lote_nombre[0]])
+                    ax.text(centroid.x, centroid.y, nombre_lote, fontsize=7.5, fontweight='bold',
+                            ha='center', va='center', color='black',
+                            bbox=dict(boxstyle='round,pad=0.15', facecolor='white', alpha=0.6, edgecolor='none'),
+                            zorder=4)
+
+            # Puntos de Muestreo
+            ax.scatter(x, y, c='#5d4037', edgecolors='black', linewidth=0.8, s=30, zorder=6)
+
+            # Etiquetas del % de Infestación
+            for px, py, pz in zip(x, y, z):
+                val_text = f"{int(round(pz))}%"
+                ax.text(px + (xmax - xmin)*0.018, py + (ymax - ymin)*0.012, val_text,
+                        fontsize=7.5, fontweight='bold', color='black',
+                        bbox=dict(boxstyle='round,pad=0.2', facecolor='white', edgecolor='gray', linewidth=0.6, alpha=0.95),
+                        ha='left', va='bottom', zorder=7)
 
             ax.set_xlim(xmin - dx, xmax + dx)
             ax.set_ylim(ymin - dy, ymax + dy)
             ax.axis('off')
 
-            # --- EXPORTACIÓN A GEOPACKAGE (GPKG) PARA AVENZA ---
-            # Crear un GeoDataFrame vectorizado con las geometrías de los lotes y puntos de muestreo
-            gdf_puntos = gpd.GeoDataFrame(
-                df_finca, 
-                geometry=gpd.points_from_xy(df_finca[col_lon], df_finca[col_lat]),
-                crs="EPSG:4326"
-            )
+            # Leyenda ubicada a la derecha fuera del mapa
+            legend_patches = [
+                mpatches.Patch(color='#2e7d32', label='0% - 10%'),
+                mpatches.Patch(color='#8bc34a', label='11% - 20%'),
+                mpatches.Patch(color='#ffeb3b', label='21% - 29%'),
+                mpatches.Patch(color='#f44336', label='30% - 40%'),
+                mpatches.Patch(color='#800000', label='41% - 100%'),
+                plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#5d4037', markeredgecolor='black', markersize=6, label='Puntos de Muestreo')
+            ]
+            ax.legend(handles=legend_patches, loc='lower left', bbox_to_anchor=(1.01, 0.05),
+                      frameon=True, framealpha=1.0, facecolor='white', edgecolor='black', 
+                      title="INFESTACION DE BROTES\n<RANGOS>", title_fontsize='8.5', fontsize=8)
 
-            gpkg_buffer = io.BytesIO()
-            # Guardar el GeoDataFrame de lotes y puntos en un paquete vectorial único
-            gdf_finca.to_file(gpkg_buffer, driver="GPKG", layer="Lotes")
-            
-            gpkg_buffer.seek(0)
+            ax.set_title(f"MAPA DE INTERPOLACIÓN IDW - COCHINILLA\n{var_label.upper()} | FINCA: {str(finca_sel).upper()}\n[{desc_texto}]", 
+                         fontsize=12, fontweight='bold', pad=15)
 
-            st.pyplot(fig)
+            # --- GENERACIÓN DEL ARCHIVO GEOTIFF GEORREFERENCIADO (RASTERIO) ---
+            grid_z_flipped = np.flipud(grid_z)
+            transform = from_bounds(xmin - dx, ymin - dy, xmax + dx, ymax + dy, resolution, resolution)
 
-            col_btn1, col_btn2 = st.columns(2)
-            with col_btn1:
-                pdf_buffer = io.BytesIO()
-                fig.savefig(pdf_buffer, format='pdf', bbox_inches='tight')
-                pdf_buffer.seek(0)
-                st.download_button(
-                    label="📄 Descargar Mapa PDF",
-                    data=pdf_buffer,
-                    file_name=f"Mapa_IDW_{finca_sel}.pdf",
-                    mime="application/pdf"
-                )
+            tif_buffer = io.BytesIO()
+            with rasterio.open(
+                tif_buffer,
+                'w',
+                driver='GTiff',
+                height=resolution,
+                width=resolution,
+                count=1,
+                dtype=rasterio.float32,
+                crs='EPSG:4326',
+                transform=transform,
+                nodata=np.nan
+            ) as dst:
+                dst.write(grid_z_flipped.astype(rasterio.float32), 1)
 
-            with col_btn2:
-                st.download_button(
-                    label="🗺️ Descargar Geopackage (.gpkg para Avenza)",
-                    data=gpkg_buffer,
-                    file_name=f"Mapa_IDW_{finca_sel}.gpkg",
-                    mime="application/geopackage+sqlite3",
-                    type="primary"
-                )
+            tif_buffer.seek(0)
+
+            # --- VISTA Y BOTONES DE DESCARGA EN STREAMLIT ---
+            col_map, col_stats = st.columns([3, 1])
+
+            with col_map:
+                st.pyplot(fig)
+
+                col_btn1, col_btn2 = st.columns(2)
+                
+                with col_btn1:
+                    pdf_buffer = io.BytesIO()
+                    fig.savefig(pdf_buffer, format='pdf', bbox_inches='tight')
+                    pdf_buffer.seek(0)
+                    st.download_button(
+                        label="📄 Descargar Mapa PDF (Lectura)",
+                        data=pdf_buffer,
+                        file_name=f"Mapa_IDW_{var_label.replace(' ', '_')}_{finca_sel}.pdf",
+                        mime="application/pdf"
+                    )
+
+                with col_btn2:
+                    st.download_button(
+                        label="🗺️ Descargar GeoTIFF (Avenza Maps)",
+                        data=tif_buffer,
+                        file_name=f"Mapa_IDW_{var_label.replace(' ', '_')}_{finca_sel}.tif",
+                        mime="image/tiff",
+                        type="primary"
+                    )
+
+            with col_stats:
+                st.subheader("📊 Resumen")
+                st.metric("Puntos Evaluados", len(df_finca))
+                st.metric("Infestación Máxima", f"{z.max():.1f}%")
+                st.metric("Infestación Promedio", f"{z.mean():.1f}%")
 
     except Exception as e:
-        st.error(f"Error procesando la información: {e}")
+        st.error(f"Error al procesar los archivos: {e}")
+
+else:
+    st.info("👈 Por favor, sube el archivo CSV de muestreo y el GeoJSON de lotes en la barra lateral para comenzar.")
