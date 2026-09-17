@@ -73,27 +73,33 @@ if file_csv and file_geojson:
         power_idw = st.sidebar.slider("Potencia IDW (p)", min_value=1.0, max_value=5.0, value=2.0, step=0.5)
         resolution = st.sidebar.slider("Resolución Malla", min_value=100, max_value=500, value=300)
 
+        # Limpieza de comas y conversión limpia de datos numéricos
         for c in df_finca.columns:
             if df_finca[c].dtype == object:
-                df_finca[c] = df_finca[c].astype(str).str.replace(',', '.')
+                df_finca[c] = df_finca[c].astype(str).str.replace(',', '.').str.strip()
 
-        # Detección inteligente de coordenadas latitud/longitud
+        # Detección y asignación robusta de Latitud y Longitud
         col_lat, col_lon = None, None
         for col in df_finca.columns:
-            try:
-                temp_vals = pd.to_numeric(df_finca[col], errors='coerce').dropna()
-                if not temp_vals.empty:
-                    mean_val = temp_vals.mean()
-                    if 10 < mean_val < 16:
-                        col_lat = col
-                    elif -90 < mean_val < -80:
-                        col_lon = col
-            except:
-                pass
-        
-        if not col_lat: col_lat = 'Y' if 'Y' in df_finca.columns else 'Latitud'
-        if not col_lon: col_lon = 'X' if 'X' in df_finca.columns else 'Longitud'
+            temp_series = pd.to_numeric(df_finca[col], errors='coerce').dropna()
+            if not temp_series.empty:
+                mean_val = temp_series.mean()
+                if 10 < mean_val < 16:
+                    col_lat = col
+                elif -90 < mean_val < -80:
+                    col_lon = col
 
+        # Corrección del mapa predeterminado en base a tu CSV (X=Lat, Y=Lon)
+        if not col_lat: 
+            col_lat = 'X' if 'X' in df_finca.columns else 'Latitud'
+        if not col_lon: 
+            col_lon = 'Y' if 'Y' in df_finca.columns else 'Longitud'
+
+        # Convertir explícitamente coordenadas a float
+        df_finca[col_lat] = pd.to_numeric(df_finca[col_lat], errors='coerce')
+        df_finca[col_lon] = pd.to_numeric(df_finca[col_lon], errors='coerce')
+
+        # Limpieza del porcentaje
         df_finca[col_val] = df_finca[col_val].astype(str).str.rstrip('%')
         df_finca[col_val] = pd.to_numeric(df_finca[col_val], errors='coerce')
         if df_finca[col_val].max() <= 1.0 and df_finca[col_val].max() > 0:
@@ -110,15 +116,23 @@ if file_csv and file_geojson:
         else:
             gdf_finca = gdf_lotes
 
-        if gdf_finca.empty: gdf_finca = gdf_lotes
+        if gdf_finca.empty: 
+            gdf_finca = gdf_lotes
 
         # --- BOTÓN DE GENERACIÓN ---
         if st.sidebar.button("🚀 Generar Mapa IDW", type="primary"):
+            # x = Longitud, y = Latitud
             x = df_finca[col_lon].to_numpy(dtype=float)
             y = df_finca[col_lat].to_numpy(dtype=float)
             z = df_finca[col_val].to_numpy(dtype=float)
 
             xmin, ymin, xmax, ymax = gdf_finca.total_bounds
+            
+            # Validación de bounding box para prevenir la excepción en Matplotlib
+            if xmin == xmax or ymin == ymax:
+                st.error("Error en las geometrías de la finca: Los límites espaciales tienen ancho o alto cero.")
+                st.stop()
+
             dx = (xmax - xmin) * 0.05
             dy = (ymax - ymin) * 0.05
             
