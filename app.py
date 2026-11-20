@@ -78,6 +78,17 @@ def a_numero(serie):
     return pd.to_numeric(s, errors='coerce')
 
 
+def hojas_excel(data_bytes):
+    return pd.ExcelFile(io.BytesIO(data_bytes)).sheet_names
+
+
+def leer_excel(data_bytes, hoja):
+    df = pd.read_excel(io.BytesIO(data_bytes), sheet_name=hoja, dtype=str)
+    df.columns = [str(c) for c in df.columns]
+    df = df.loc[:, ~df.columns.str.startswith("Unnamed")]        # columnas vacías de Excel
+    return df.dropna(how="all")                                   # filas vacías
+
+
 def leer_csv(data_bytes):
     texto = data_bytes.decode('utf-8-sig', errors='replace')
     primera = texto.splitlines()[0] if texto else ""
@@ -425,7 +436,17 @@ def geotiff_rgba(grid_z, bounds, crs):
 # 1. Carga de datos
 # ======================================================================
 st.sidebar.header("1. Carga de Datos")
-file_csv = st.sidebar.file_uploader("Subir Muestreo AppSheet (CSV)", type=["csv"])
+file_csv = st.sidebar.file_uploader("Subir Muestreo AppSheet (CSV o Excel)",
+                                    type=["csv", "xlsx", "xlsm", "xls"])
+hoja_excel = None
+if file_csv and not file_csv.name.lower().endswith(".csv"):
+    try:
+        hojas = hojas_excel(file_csv.getvalue())
+        hoja_excel = st.sidebar.selectbox("Hoja del Excel", hojas) if len(hojas) > 1 else hojas[0]
+    except Exception as e:
+        st.error("No se pudo abrir el archivo Excel.")
+        st.exception(e)
+        st.stop()
 
 capas_repo = []
 for carpeta in CARPETAS_CAPAS:
@@ -446,14 +467,17 @@ with st.sidebar.expander("Capa de lotes", expanded=not capas_repo):
                                    help="Shapefile comprimido en .zip con .shp, .shx, .dbf y .prj")
 
 if not file_csv:
-    st.info("👈 Sube el archivo CSV de muestreo para comenzar.")
+    st.info("👈 Sube el archivo de muestreo (CSV o Excel) para comenzar.")
     st.stop()
 if not (capa_subida or capa_sel):
     st.error("No hay capa de lotes: agrégala a la carpeta `capas/` o súbela en la barra lateral.")
     st.stop()
 
 try:
-    df_points = leer_csv(file_csv.getvalue())
+    if hoja_excel is not None:
+        df_points = leer_excel(file_csv.getvalue(), hoja_excel)
+    else:
+        df_points = leer_csv(file_csv.getvalue())
     df_points.columns = df_points.columns.str.strip()
     gdf_lotes = leer_capa_subida(capa_subida) if capa_subida else leer_capa(capa_sel)
 except Exception as e:
@@ -483,7 +507,7 @@ if c_brote:
 if c_macolla:
     dict_opciones["% Macollas Infestadas"] = c_macolla
 if not dict_opciones:
-    st.error("El CSV no tiene columnas de BROTES ni MACOLLAS.")
+    st.error("El archivo de muestreo no tiene columnas de BROTES ni MACOLLAS.")
     st.stop()
 var_label = st.sidebar.selectbox("Variable a Interpolar", list(dict_opciones.keys()))
 col_val = dict_opciones[var_label]
@@ -512,7 +536,7 @@ col_lon = detectar_coord(df_finca, {'LON', 'LONG', 'LONGITUD', 'LONGITUDE', 'X'}
 if not col_lat or not col_lon:
     col_lat, col_lon = separar_latlong(df_finca)
 if not col_lat or not col_lon:
-    st.error("No se encontraron columnas de latitud/longitud en el CSV.")
+    st.error("No se encontraron columnas de latitud/longitud en el archivo de muestreo.")
     st.stop()
 df_finca['__lat'] = a_numero(df_finca[col_lat])
 df_finca['__lon'] = a_numero(df_finca[col_lon])
@@ -723,7 +747,7 @@ def generar():
 
 
 firma = (finca_sel, var_label, power_idw, resolution, radio_max, solo_con_puntos, mapa_base,
-         col_lote, col_finca_geo, file_csv.name, capa_subida.name if capa_subida else capa_sel)
+         col_lote, col_finca_geo, file_csv.name, hoja_excel, capa_subida.name if capa_subida else capa_sel)
 
 if st.sidebar.button("🚀 Generar Mapa IDW", type="primary"):
     try:
