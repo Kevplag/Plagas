@@ -528,7 +528,15 @@ radio_max = st.sidebar.number_input(
     "Radio máximo de influencia (m) — 0 = sin límite", min_value=0, value=0, step=50,
     help="Las zonas más lejanas que este radio a cualquier punto quedan en blanco.")
 mapa_base = st.sidebar.selectbox("Mapa base", list(MAPAS_BASE.keys()), index=0)
-solo_con_puntos = st.sidebar.checkbox("Mostrar solo lotes con puntos de muestreo", value=False)
+AREAS = ["Solo lotes muestreados",
+         "Toda la finca (lotes sin muestreo en gris)",
+         "Toda la finca (interpolar todo)"]
+area_mapa = st.sidebar.radio("Área a mapear", AREAS, index=0,
+                             help="El IDW solo es confiable dentro de los lotes que tienen puntos. "
+                                  "Interpolar toda la finca rellena lotes sin muestreo con el valor de "
+                                  "puntos lejanos.")
+tolerancia_gps = st.sidebar.number_input("Tolerancia GPS para asignar puntos a un lote (m)",
+                                         min_value=0, value=30, step=5)
 
 # ---------- Coordenadas ----------
 col_lat = detectar_coord(df_finca, {'LAT', 'LATITUD', 'LATITUDE', 'Y'}, 10, 16, excluir={col_val})
@@ -577,10 +585,38 @@ if gdf_finca.empty:
                  "Revisa la columna de FINCA en 'Columnas de la capa de lotes'.")
         st.stop()
 
-if solo_con_puntos:
-    con_pts = gpd.sjoin(gdf_finca, gdf_pts_l[['geometry']], how='inner', predicate='intersects').index.unique()
-    if len(con_pts):
-        gdf_finca = gdf_finca.loc[con_pts]
+# ---------- Lotes muestreados (por NOMBRE de lote, no por polígono) ----------
+utm_sel = gdf_finca.estimate_utm_crs()
+finca_utm = gdf_finca.to_crs(utm_sel)
+pts_utm = gdf_pts.to_crs(utm_sel)[['geometry']]
+cerca = gpd.sjoin_nearest(pts_utm, finca_utm[[col_lote, 'geometry']], how='inner',
+                          max_distance=max(tolerancia_gps, 0.01))
+nombres_muestreados = set(cerca[col_lote].dropna().map(normalizar))
+
+# Si el muestreo trae una columna de lote/campo, también se usa
+col_lote_csv = next((c for c in df_finca.columns
+                     if any(k in c.upper() for k in ('LOTE', 'CAMPO')) and 'DESCRIP' not in c.upper()), None)
+if col_lote_csv:
+    nombres_capa = set(gdf_finca[col_lote].dropna().map(normalizar))
+    nombres_muestreados |= set(df_finca[col_lote_csv].dropna().map(normalizar)) & nombres_capa
+
+es_muestreado = gdf_finca[col_lote].map(normalizar).isin(nombres_muestreados)
+if not es_muestreado.any():
+    st.warning("Ningún punto cae dentro (o cerca) de un lote de la finca: se interpola toda la finca. "
+               "Revisa las coordenadas o la columna de LOTE.")
+    es_muestreado = pd.Series(True, index=gdf_finca.index)
+
+gdf_muestreados = gdf_finca[es_muestreado]
+if area_mapa == AREAS[0]:
+    gdf_vista, gdf_interp = gdf_muestreados, gdf_muestreados
+elif area_mapa == AREAS[1]:
+    gdf_vista, gdf_interp = gdf_finca, gdf_muestreados
+else:
+    gdf_vista, gdf_interp = gdf_finca, gdf_finca
+
+fuera = len(pts_utm) - cerca.index.nunique()
+if fuera:
+    st.warning(f"{fuera} punto(s) están a más de {tolerancia_gps} m de cualquier lote de la finca.")
 
 if len(df_finca) < 15:
     st.warning(f"Solo hay {len(df_finca)} puntos de muestreo: el mapa es indicativo. "
@@ -591,8 +627,10 @@ if len(df_finca) < 15:
 # 3. Generación
 # ======================================================================
 def generar():
-    utm = gdf_finca.estimate_utm_crs()
-    lotes = gdf_finca.to_crs(utm)
+    utm = gdf_vista.estimate_utm_crs()
+    lotes = gdf_vista.to_crs(utm)
+    lotes_interp = gdf_interp.to_crs(utm)
+    lotes_sin = lotes.loc[~lotes.index.isin(lotes_interp.index)]
     pts = gdf_pts.to_crs(utm)
     x = pts.geometry.x.to_numpy()
     y = pts.geometry.y.to_numpy()
@@ -612,8 +650,10 @@ def generar():
     gx, gy = np.meshgrid(xmin + (np.arange(nx) + 0.5) * celda,
                          ymin + (np.arange(ny) + 0.5) * celda)
 
-    union = lotes.union_all() if hasattr(lotes, "union_all") else lotes.unary_union
-    mask = shapely.contains_xy(union, gx.ravel(), gy.ravel())
+    def unir(g):
+        return g.union_all() if hasattr(g, "union_all") else g.unary_union
+    union = unir(lotes)                         # todo lo visible (para ubicar leyenda, etc.)
+    mask = shapely.contains_xy(unir(lotes_interp), gx.ravel(), gy.ravel())
     zi = np.full(gx.size, np.nan)
     zi[mask] = idw(x, y, z, gx.ravel()[mask], gy.ravel()[mask],
                    power=power_idw, radio=radio_max or None)
@@ -643,13 +683,20 @@ def generar():
 
     ax.contourf(gx, gy, np.ma.masked_invalid(grid_z), levels=LEVELS, cmap=CMAP, norm=NORM,
                 alpha=0.88, zorder=2)
+    if not lotes_sin.empty:
+        lotes_sin.plot(ax=ax, facecolor="#d9d9d9", edgecolor="#7f7f7f", hatch='////',
+                       linewidth=0.5, alpha=0.8, zorder=2.5)
     lotes.plot(ax=ax, facecolor="none", edgecolor="black", linewidth=0.8, zorder=3)
 
-    # Etiquetas de lote giradas según la forma del lote
-    for _, row in lotes.iterrows():
-        p = row.geometry.representative_point()
-        ax.text(p.x, p.y, str(row[col_lote]), fontsize=5.5, ha='center', va='center',
-                rotation=angulo_lote(row.geometry), rotation_mode='anchor', color='black', zorder=4,
+    # Una etiqueta por lote (aunque el lote tenga varias partes), en su parte más grande,
+    # girada según la forma del lote
+    partes = lotes[[col_lote, 'geometry']].explode(index_parts=False).reset_index(drop=True)
+    partes['__area'] = partes.geometry.area
+    for nombre, grupo in partes.groupby(col_lote):
+        geom = grupo.loc[grupo['__area'].idxmax(), 'geometry']
+        p = geom.representative_point()
+        ax.text(p.x, p.y, str(nombre), fontsize=5.5, ha='center', va='center',
+                rotation=angulo_lote(geom), rotation_mode='anchor', color='black', zorder=4,
                 bbox=dict(boxstyle='round,pad=0.12', facecolor='white', alpha=0.6, edgecolor='none'))
 
     ax.scatter(x, y, c='#3e2723', edgecolors='white', linewidth=0.7, s=26, zorder=6)
@@ -669,6 +716,9 @@ def generar():
         mpatches.Patch(color='none', label='<RANGOS>'),
     ] + [mpatches.Patch(facecolor=c, edgecolor='black', linewidth=0.4, label=l)
          for c, l in zip(COLORS, LABELS)]
+    if not lotes_sin.empty:
+        handles.append(mpatches.Patch(facecolor='#d9d9d9', edgecolor='#7f7f7f', hatch='////',
+                                      linewidth=0.4, label='Sin muestreo'))
 
     def crear_leyenda(loc):
         leg = ax.legend(handles=handles, loc=loc, title='Leyenda', title_fontsize=8.5,
@@ -746,7 +796,7 @@ def generar():
                 zmax=float(z.max()), zmean=float(z.mean()), epsg=utm.to_epsg())
 
 
-firma = (finca_sel, var_label, power_idw, resolution, radio_max, solo_con_puntos, mapa_base,
+firma = (finca_sel, var_label, power_idw, resolution, radio_max, area_mapa, tolerancia_gps, mapa_base,
          col_lote, col_finca_geo, file_csv.name, hoja_excel, capa_subida.name if capa_subida else capa_sel)
 
 if st.sidebar.button("🚀 Generar Mapa IDW", type="primary"):
