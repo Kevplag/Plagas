@@ -10,3 +10,5 @@ scipy
 rasterio
 pypdf>=4.0
 contextily
+openpyxl
+xlrd
