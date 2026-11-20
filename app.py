@@ -11,6 +11,7 @@ import io
 import os
 import glob
 import tempfile
+import zipfile
 import unicodedata
 
 import numpy as np
@@ -38,8 +39,9 @@ try:
 except ImportError:
     HAY_RASTERIO = False
 
-CARPETA_CAPAS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "capas")
-EXT_CAPAS = (".shp", ".gpkg", ".geojson", ".json", ".zip", ".kml")
+CARPETA_APP = os.path.dirname(os.path.abspath(__file__))
+CARPETAS_CAPAS = [os.path.join(CARPETA_APP, "capas"), CARPETA_APP]   # capas/ y raíz del repo
+EXT_CAPAS = (".shp", ".gpkg", ".geojson", ".zip", ".kml")
 
 # Clases de infestación (cortes en .5 para que coincidan con la etiqueta redondeada)
 LEVELS = [0.0, 10.5, 20.5, 29.5, 40.5, 100.0001]
@@ -106,8 +108,7 @@ def separar_latlong(df):
 
 @st.cache_data(show_spinner="Leyendo capa de lotes...")
 def leer_capa(ruta):
-    ruta_leer = f"zip://{ruta}" if ruta.lower().endswith(".zip") else ruta
-    gdf = gpd.read_file(ruta_leer)
+    gdf = gpd.read_file(ruta)
     if gdf.crs is None:
         gdf = gdf.set_crs(epsg=4326)
     gdf = gdf[gdf.geometry.notna() & ~gdf.geometry.is_empty].copy()
@@ -115,11 +116,32 @@ def leer_capa(ruta):
     return gdf
 
 
+def opciones_capa(ruta):
+    """Devuelve las capas legibles de un archivo. Para un .zip, cada .shp/.gpkg/.geojson que contenga
+    (aunque esté dentro de subcarpetas)."""
+    if not ruta.lower().endswith(".zip"):
+        return [ruta]
+    with zipfile.ZipFile(ruta) as zf:
+        internos = [n for n in zf.namelist()
+                    if n.lower().endswith((".shp", ".gpkg", ".geojson")) and not n.startswith("__MACOSX")]
+    return [f"zip://{ruta}!{n}" for n in internos]
+
+
+def nombre_capa(ruta):
+    if ruta.startswith("zip://"):
+        zip_path, interno = ruta[6:].split("!", 1)
+        return f"{os.path.basename(zip_path)} → {interno}"
+    return os.path.basename(ruta)
+
+
 def leer_capa_subida(archivo):
     sufijo = os.path.splitext(archivo.name)[1].lower()
     with tempfile.NamedTemporaryFile(delete=False, suffix=sufijo) as tmp:
         tmp.write(archivo.getvalue())
-    return leer_capa(tmp.name)
+    opciones = opciones_capa(tmp.name)
+    if not opciones:
+        raise ValueError("El .zip no contiene ningún .shp, .gpkg ni .geojson.")
+    return leer_capa(opciones[0])
 
 
 def adivinar_columna(columnas, preferidas):
@@ -237,14 +259,20 @@ def geotiff_rgba(grid_z, bounds, crs):
 st.sidebar.header("1. Carga de Datos")
 file_csv = st.sidebar.file_uploader("Subir Muestreo AppSheet (CSV)", type=["csv"])
 
-capas_repo = sorted(p for p in glob.glob(os.path.join(CARPETA_CAPAS, "*"))
-                    if p.lower().endswith(EXT_CAPAS))
+capas_repo = []
+for carpeta in CARPETAS_CAPAS:
+    for p in sorted(glob.glob(os.path.join(carpeta, "*"))):
+        if p.lower().endswith(EXT_CAPAS):
+            try:
+                capas_repo.extend(opciones_capa(p))
+            except zipfile.BadZipFile:
+                pass
 with st.sidebar.expander("Capa de lotes", expanded=not capas_repo):
     if capas_repo:
-        capa_sel = st.selectbox("Capa del repositorio", capas_repo, format_func=os.path.basename)
+        capa_sel = st.selectbox("Capa del repositorio", capas_repo, format_func=nombre_capa)
     else:
         capa_sel = None
-        st.warning("No hay capas en la carpeta `capas/` del repositorio.")
+        st.warning("No hay capas en el repositorio (raíz o carpeta `capas/`).")
     capa_subida = st.file_uploader("O subir otra capa (opcional)",
                                    type=["zip", "gpkg", "geojson", "json", "kml"],
                                    help="Shapefile comprimido en .zip con .shp, .shx, .dbf y .prj")
