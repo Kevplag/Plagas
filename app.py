@@ -39,6 +39,12 @@ try:
 except ImportError:
     HAY_RASTERIO = False
 
+try:
+    import contextily as ctx
+    HAY_CTX = True
+except ImportError:
+    HAY_CTX = False
+
 CARPETA_APP = os.path.dirname(os.path.abspath(__file__))
 CARPETAS_CAPAS = [os.path.join(CARPETA_APP, "capas"), CARPETA_APP]   # capas/ y raíz del repo
 EXT_CAPAS = (".shp", ".gpkg", ".geojson", ".zip", ".kml")
@@ -175,25 +181,187 @@ def redondear(v):
     return int(np.floor(v + 0.5))
 
 
-def barra_escala(ax, xmin, xmax, ymin, ymax):
-    ancho = xmax - xmin
-    objetivo = ancho / 5
+def esquina_box(esquina, w, h, margen=0.015):
+    """Caja (x0, y0, x1, y1) en fracción de ejes para una esquina dada."""
+    x0 = margen if 'left' in esquina else 1 - margen - w
+    y0 = margen if 'lower' in esquina else 1 - margen - h
+    return (x0, y0, x0 + w, y0 + h)
+
+
+def solape(box_frac, vista, union, pts_xy):
+    """Área de lotes + puntos que quedarían tapados por una caja (en fracción de ejes)."""
+    vx0, vy0, vx1, vy1 = vista
+    bx0 = vx0 + box_frac[0] * (vx1 - vx0)
+    bx1 = vx0 + box_frac[2] * (vx1 - vx0)
+    by0 = vy0 + box_frac[1] * (vy1 - vy0)
+    by1 = vy0 + box_frac[3] * (vy1 - vy0)
+    caja = shapely.box(bx0, by0, bx1, by1)
+    area = union.intersection(caja).area / max(caja.area, 1)
+    n_pts = sum(1 for px, py in pts_xy if bx0 <= px <= bx1 and by0 <= py <= by1)
+    return area + 2.0 * n_pts
+
+
+def mejor_esquina(candidatas, w, h, vista, union, pts_xy):
+    return min(candidatas, key=lambda e: solape(esquina_box(e, w, h), vista, union, pts_xy))
+
+
+def barra_escala(ax, esquina, vista):
+    vx0, vy0, vx1, vy1 = vista
+    ancho = vx1 - vx0
     largo = max([c for c in (25, 50, 100, 200, 250, 500, 1000, 2000, 2500, 5000, 10000)
-                 if c <= objetivo] or [25])
-    x0 = xmin + ancho * 0.03
-    y0 = ymin + (ymax - ymin) * 0.04
-    h = (ymax - ymin) * 0.008
-    ax.add_patch(mpatches.Rectangle((x0, y0), largo / 2, h, fc='black', ec='black', zorder=8))
-    ax.add_patch(mpatches.Rectangle((x0 + largo / 2, y0), largo / 2, h, fc='white', ec='black', zorder=8))
+                 if c <= ancho / 5] or [25])
+    w_frac = largo / ancho
+    bx0, by0, _, _ = esquina_box(esquina, w_frac + 0.04, 0.06)
+    x0 = vx0 + (bx0 + 0.02) * ancho
+    y0 = vy0 + (by0 + 0.018) * (vy1 - vy0)
+    h = (vy1 - vy0) * 0.009
+    ax.add_patch(mpatches.FancyBboxPatch(
+        (x0 - ancho * 0.015, y0 - h * 1.6), largo + ancho * 0.03, h * 6.2,
+        boxstyle='round,pad=0', fc='white', ec='black', lw=0.6, alpha=0.9, zorder=8))
+    for i in range(4):
+        ax.add_patch(mpatches.Rectangle((x0 + i * largo / 4, y0), largo / 4, h,
+                                        fc='black' if i % 2 == 0 else 'white', ec='black', lw=0.6, zorder=9))
     etiqueta = f"{largo / 1000:g} km" if largo >= 1000 else f"{largo} m"
-    ax.text(x0, y0 + h * 1.8, "0", fontsize=6.5, ha='center', va='bottom', zorder=8)
-    ax.text(x0 + largo, y0 + h * 1.8, etiqueta, fontsize=6.5, ha='center', va='bottom', zorder=8)
+    for xx, t in [(x0, "0"), (x0 + largo / 2, f"{largo / 2:g}"), (x0 + largo, etiqueta)]:
+        ax.text(xx, y0 + h * 1.6, t, fontsize=6, ha='center', va='bottom', zorder=9)
 
 
-def flecha_norte(ax):
-    ax.annotate('N', xy=(0.04, 0.95), xytext=(0.04, 0.86), xycoords='axes fraction',
-                ha='center', va='center', fontsize=11, fontweight='bold',
-                arrowprops=dict(facecolor='black', width=4, headwidth=11), zorder=8)
+def rosa_vientos(fig, ax, esquina, tam_frac):
+    """Rosa de los vientos N-E-S-W (como la de ArcGIS) en un eje pequeño sobre el mapa."""
+    pos = ax.get_position()
+    w_fig, h_fig = fig.get_size_inches()
+    lado_in = tam_frac * pos.height * h_fig
+    w = lado_in / w_fig
+    h = lado_in / h_fig
+    m = 0.015
+    x0 = pos.x0 + m * pos.width if 'left' in esquina else pos.x1 - m * pos.width - w
+    y0 = pos.y0 + m * pos.height if 'lower' in esquina else pos.y1 - m * pos.height - h
+    axr = fig.add_axes([x0, y0, w, h], zorder=20)
+    axr.set_xlim(-1.45, 1.45); axr.set_ylim(-1.45, 1.45)
+    axr.set_aspect('equal'); axr.axis('off')
+    axr.add_patch(mpatches.Circle((0, 0), 1.42, fc='white', ec='none', alpha=0.75))
+    axr.add_patch(mpatches.Circle((0, 0), 0.62, fc='none', ec='black', lw=0.6))
+
+    def brazo(ang, largo, ancho, oscuro):
+        a = np.radians(ang)
+        tip = (largo * np.cos(a), largo * np.sin(a))
+        izq = (ancho * np.cos(a + np.pi / 2), ancho * np.sin(a + np.pi / 2))
+        der = (ancho * np.cos(a - np.pi / 2), ancho * np.sin(a - np.pi / 2))
+        axr.add_patch(mpatches.Polygon([(0, 0), tip, izq], fc=oscuro, ec='black', lw=0.5))
+        axr.add_patch(mpatches.Polygon([(0, 0), tip, der], fc='white', ec='black', lw=0.5))
+
+    for ang in (45, 135, 225, 315):
+        brazo(ang, 0.62, 0.12, '#555555')
+    for ang in (90, 0, 270, 180):
+        brazo(ang, 1.0, 0.17, 'black')
+    for ang, letra in [(90, 'N'), (0, 'E'), (270, 'S'), (180, 'W')]:
+        a = np.radians(ang)
+        axr.text(1.24 * np.cos(a), 1.24 * np.sin(a), letra, ha='center', va='center',
+                 fontsize=8 if letra == 'N' else 6.5, fontweight='bold')
+    return axr
+
+
+def fmt_dms(valor, pos_letra, neg_letra):
+    letra = pos_letra if valor >= 0 else neg_letra
+    v = abs(valor)
+    g = int(v)
+    mnt = int((v - g) * 60)
+    s = round(((v - g) * 60 - mnt) * 60)
+    if s == 60:
+        s, mnt = 0, mnt + 1
+    if mnt == 60:
+        mnt, g = 0, g + 1
+    return f"{g}°{mnt:02d}'{s:02d}\"{letra}"
+
+
+def graticula(ax, utm, vista):
+    """Coordenadas geográficas (grados-minutos-segundos) en los 4 bordes del marco."""
+    vx0, vy0, vx1, vy1 = vista
+    a_geo = Transformer.from_crs(utm, "EPSG:4326", always_xy=True)
+    a_utm = Transformer.from_crs("EPSG:4326", utm, always_xy=True)
+    lons, lats = a_geo.transform([vx0, vx1, vx0, vx1], [vy0, vy0, vy1, vy1])
+    lon0, lon1, lat0, lat1 = min(lons), max(lons), min(lats), max(lats)
+
+    def paso(span):
+        for seg in (5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200):
+            if span / (seg / 3600) <= 5:
+                return seg / 3600
+        return 2.0
+
+    p_lon, p_lat = paso(lon1 - lon0), paso(lat1 - lat0)
+    meridianos = np.arange(np.ceil(lon0 / p_lon) * p_lon, lon1, p_lon)
+    paralelos = np.arange(np.ceil(lat0 / p_lat) * p_lat, lat1, p_lat)
+    m = np.linspace(lat0 - p_lat, lat1 + p_lat, 60)
+    n = np.linspace(lon0 - p_lon, lon1 + p_lon, 60)
+
+    abajo, arriba, izq, der = [], [], [], []
+    for lon in meridianos:
+        xs, ys = a_utm.transform(np.full_like(m, lon), m)
+        lab = fmt_dms(lon, 'E', 'W')
+        for lista, yy in ((abajo, vy0), (arriba, vy1)):
+            xx = np.interp(yy, ys, xs)
+            if vx0 < xx < vx1:
+                lista.append((xx, lab))
+    for lat in paralelos:
+        xs, ys = a_utm.transform(n, np.full_like(n, lat))
+        lab = fmt_dms(lat, 'N', 'S')
+        for lista, xx in ((izq, vx0), (der, vx1)):
+            yy = np.interp(xx, xs, ys)
+            if vy0 < yy < vy1:
+                lista.append((yy, lab))
+
+    estilo = dict(direction='in', length=4, width=0.6, labelsize=6.5, pad=2)
+    ax.set_xticks([v for v, _ in abajo], [t for _, t in abajo])
+    ax.set_yticks([v for v, _ in izq], [t for _, t in izq], rotation=90, va='center')
+    ax.tick_params(**estilo)
+    sx = ax.secondary_xaxis('top')
+    sx.set_xticks([v for v, _ in arriba], [t for _, t in arriba])
+    sx.tick_params(**estilo)
+    sy = ax.secondary_yaxis('right')
+    sy.set_yticks([v for v, _ in der], [t for _, t in der], rotation=270, va='center')
+    sy.tick_params(**estilo)
+    ax.set_xlabel(''); ax.set_ylabel('')
+
+
+def angulo_lote(geom):
+    """Ángulo del eje largo del lote, para girar su etiqueta (como en ArcGIS)."""
+    try:
+        r = geom.minimum_rotated_rectangle
+        c = np.array(r.exterior.coords)[:3]
+        lados = [c[1] - c[0], c[2] - c[1]]
+        v = max(lados, key=lambda d: np.hypot(*d))
+        ang = np.degrees(np.arctan2(v[1], v[0]))
+        if ang > 90: ang -= 180
+        if ang < -90: ang += 180
+        return ang
+    except Exception:
+        return 0.0
+
+
+MAPAS_BASE = {
+    "Topográfico (Esri)": "Esri.WorldTopoMap",
+    "Satélite (Esri)": "Esri.WorldImagery",
+    "Calles (OpenStreetMap)": "OpenStreetMap.Mapnik",
+    "Claro (CARTO)": "CartoDB.Positron",
+    "Ninguno": None,
+}
+
+
+def agregar_mapa_base(ax, utm, nombre):
+    clave = MAPAS_BASE.get(nombre)
+    if not clave:
+        return None
+    if not HAY_CTX:
+        return "No está instalado 'contextily': el mapa se generó sin mapa base."
+    try:
+        prov = ctx.providers
+        for parte in clave.split('.'):
+            prov = prov[parte]
+        ctx.add_basemap(ax, crs=utm.to_string(), source=prov, attribution_size=5,
+                        zorder=0, reset_extent=True)
+        return None
+    except Exception as e:
+        return f"No se pudo descargar el mapa base ({e}). El mapa se generó sin él."
 
 
 def geopdf(pdf_bytes, bbox_pts, esquinas_latlon, epsg, wkt):
@@ -335,6 +503,7 @@ resolution = st.sidebar.slider("Resolución Malla (celdas lado mayor)", 100, 600
 radio_max = st.sidebar.number_input(
     "Radio máximo de influencia (m) — 0 = sin límite", min_value=0, value=0, step=50,
     help="Las zonas más lejanas que este radio a cualquier punto quedan en blanco.")
+mapa_base = st.sidebar.selectbox("Mapa base", list(MAPAS_BASE.keys()), index=0)
 solo_con_puntos = st.sidebar.checkbox("Mostrar solo lotes con puntos de muestreo", value=False)
 
 # ---------- Coordenadas ----------
@@ -408,7 +577,7 @@ def generar():
     bxmin, bymin, bxmax, bymax = lotes.total_bounds
     bxmin, bymin = min(bxmin, x.min()), min(bymin, y.min())
     bxmax, bymax = max(bxmax, x.max()), max(bymax, y.max())
-    m = max(bxmax - bxmin, bymax - bymin) * 0.05
+    m = max(bxmax - bxmin, bymax - bymin) * 0.03
     xmin, ymin, xmax, ymax = bxmin - m, bymin - m, bxmax + m, bymax + m
 
     # Malla de celdas cuadradas, puntos en el CENTRO de cada píxel
@@ -426,47 +595,107 @@ def generar():
                    power=power_idw, radio=radio_max or None)
     grid_z = zi.reshape(gx.shape)
 
-    # ---------------- Figura ----------------
-    fig = plt.figure(figsize=(13, 8.5))
-    ax = fig.add_axes([0.03, 0.04, 0.76, 0.84])
-    ax.contourf(gx, gy, np.ma.masked_invalid(grid_z), levels=LEVELS, cmap=CMAP, norm=NORM,
-                alpha=0.9, zorder=2)
-    lotes.plot(ax=ax, facecolor="none", edgecolor="black", linewidth=0.9, zorder=3)
+    # ---------------- Página y extensión de la vista ----------------
+    horizontal = (bxmax - bxmin) >= (bymax - bymin)
+    figsize = (13, 8.5) if horizontal else (8.5, 11)
+    rect = [0.045, 0.035, 0.91, 0.855] if horizontal else [0.06, 0.03, 0.88, 0.885]
+    fig = plt.figure(figsize=figsize)
+    ax = fig.add_axes(rect)
 
-    dx, dy = xmax - xmin, ymax - ymin
+    # La vista se amplía para llenar todo el marco (sin bordes blancos) manteniendo escala 1:1
+    relacion = (rect[2] * figsize[0]) / (rect[3] * figsize[1])
+    cx, cy = (bxmin + bxmax) / 2, (bymin + bymax) / 2
+    vw = (bxmax - bxmin) * 1.12
+    vh = (bymax - bymin) * 1.12
+    if vw / vh < relacion:
+        vw = vh * relacion
+    else:
+        vh = vw / relacion
+    vista = (cx - vw / 2, cy - vh / 2, cx + vw / 2, cy + vh / 2)
+    ax.set_xlim(vista[0], vista[2]); ax.set_ylim(vista[1], vista[3])
+    ax.set_aspect('equal', adjustable='box')
+
+    aviso_base = agregar_mapa_base(ax, utm, mapa_base)
+
+    ax.contourf(gx, gy, np.ma.masked_invalid(grid_z), levels=LEVELS, cmap=CMAP, norm=NORM,
+                alpha=0.88, zorder=2)
+    lotes.plot(ax=ax, facecolor="none", edgecolor="black", linewidth=0.8, zorder=3)
+
+    # Etiquetas de lote giradas según la forma del lote
     for _, row in lotes.iterrows():
         p = row.geometry.representative_point()
-        ax.text(p.x, p.y, str(row[col_lote]), fontsize=6, fontweight='bold', ha='center',
-                va='center', color='black', zorder=4,
-                bbox=dict(boxstyle='round,pad=0.12', facecolor='white', alpha=0.55, edgecolor='none'))
+        ax.text(p.x, p.y, str(row[col_lote]), fontsize=5.5, ha='center', va='center',
+                rotation=angulo_lote(row.geometry), rotation_mode='anchor', color='black', zorder=4,
+                bbox=dict(boxstyle='round,pad=0.12', facecolor='white', alpha=0.6, edgecolor='none'))
 
-    ax.scatter(x, y, c='#5d4037', edgecolors='black', linewidth=0.8, s=30, zorder=6)
+    ax.scatter(x, y, c='#3e2723', edgecolors='white', linewidth=0.7, s=26, zorder=6)
     for px, py, pz in zip(x, y, z):
-        ax.text(px + dx * 0.008, py + dy * 0.008, f"{redondear(pz)}%", fontsize=7.5,
-                fontweight='bold', color='black', ha='left', va='bottom', zorder=7,
-                bbox=dict(boxstyle='round,pad=0.2', facecolor='white', edgecolor='gray',
-                          linewidth=0.6, alpha=0.95))
+        ax.annotate(f"{redondear(pz)}%", (px, py), xytext=(4, 3), textcoords='offset points',
+                    fontsize=7.5, fontweight='bold', color='black', ha='left', va='bottom', zorder=7,
+                    bbox=dict(boxstyle='round,pad=0.18', facecolor='white', edgecolor='gray',
+                              linewidth=0.5, alpha=0.9))
 
-    ax.set_xlim(xmin, xmax)
-    ax.set_ylim(ymin, ymax)
-    ax.set_aspect('equal', adjustable='box')
-    ax.set_xticks([]); ax.set_yticks([])          # se deja el marco (neatline)
-    barra_escala(ax, xmin, xmax, ymin, ymax)
-    flecha_norte(ax)
+    # ---------------- Leyenda (dentro del mapa, en la mejor esquina) ----------------
+    titulo_var = 'BROTES' if 'BROTE' in var_label.upper() else 'MACOLLAS'
+    handles = [
+        Line2D([0], [0], marker='o', color='none', markerfacecolor='#3e2723',
+               markeredgecolor='white', markersize=6, label='Estaciones'),
+        mpatches.Patch(facecolor='none', edgecolor='black', label='Lotes'),
+        mpatches.Patch(color='none', label=f'INFESTACIÓN DE {titulo_var}'),
+        mpatches.Patch(color='none', label='<RANGOS>'),
+    ] + [mpatches.Patch(facecolor=c, edgecolor='black', linewidth=0.4, label=l)
+         for c, l in zip(COLORS, LABELS)]
 
-    handles = [mpatches.Patch(color=c, label=l) for c, l in zip(COLORS, LABELS)]
-    handles.append(Line2D([0], [0], marker='o', color='w', markerfacecolor='#5d4037',
-                          markeredgecolor='black', markersize=6, label='Puntos de Muestreo'))
-    fig.legend(handles=handles, loc='lower left', bbox_to_anchor=(0.80, 0.08),
-               frameon=True, framealpha=1.0, facecolor='white', edgecolor='black',
-               title=f"{var_label.upper().replace('% ', '')}\n<RANGOS>",
-               title_fontsize=8.5, fontsize=8)
-    fig.suptitle(f"MAPA DE INTERPOLACIÓN IDW - COCHINILLA\n{var_label.upper()} | "
-                 f"FINCA: {str(finca_sel).upper()}\n[{desc_texto}]",
-                 fontsize=12, fontweight='bold', y=0.985)
+    def crear_leyenda(loc):
+        leg = ax.legend(handles=handles, loc=loc, title='Leyenda', title_fontsize=8.5,
+                        fontsize=7, frameon=True, framealpha=0.95, facecolor='white',
+                        edgecolor='black', borderpad=0.7, labelspacing=0.45, handlelength=1.6,
+                        borderaxespad=0.8)
+        leg.get_title().set_fontweight('bold')
+        leg.get_title().set_ha('left')
+        leg._legend_box.align = "left"
+        for t in leg.get_texts()[2:4]:
+            t.set_fontweight('bold'); t.set_fontsize(7)
+        leg.get_frame().set_linewidth(0.8)
+        leg.set_zorder(15)
+        return leg
 
-    # Posición real del mapa en la página (en puntos PDF)
+    leg = crear_leyenda('upper right')
     fig.canvas.draw()
+    bb = leg.get_window_extent().transformed(ax.transAxes.inverted())
+    pts_xy = list(zip(x, y))
+    esquinas = ['upper left', 'upper right', 'lower left', 'lower right']
+    esq_leyenda = mejor_esquina(esquinas, bb.width, bb.height, vista, union, pts_xy)
+    leg.remove()
+    crear_leyenda(esq_leyenda)
+
+    # Rosa de los vientos (arriba) y escala (abajo), en las esquinas libres
+    tam_rosa = 0.13
+    pos = ax.get_position()
+    w_rosa = tam_rosa * pos.height * figsize[1] / (pos.width * figsize[0])
+    # La rosa prefiere arriba, pero puede ir abajo si arriba tapa lotes o puntos
+    libres = [e for e in esquinas if e != esq_leyenda]
+    esq_rosa = min(libres, key=lambda e: solape(esquina_box(e, w_rosa, tam_rosa), vista, union, pts_xy)
+                   + (0.03 if 'lower' in e else 0))
+    libres = [e for e in libres if e != esq_rosa]
+    esq_escala = min(libres, key=lambda e: solape(esquina_box(e, 0.25, 0.07), vista, union, pts_xy)
+                     + (0.03 if 'upper' in e else 0))
+    barra_escala(ax, esq_escala, vista)
+
+    # ---------------- Coordenadas y título ----------------
+    graticula(ax, utm, vista)
+    for s in ax.spines.values():
+        s.set_linewidth(1.0)
+    ax.annotate("MAPA DE INFESTACIÓN POR COCHINILLA HARINOSA", (0.5, 1), xycoords='axes fraction',
+                xytext=(0, 30), textcoords='offset points', ha='center', va='bottom',
+                fontsize=14, fontweight='bold')
+    ax.annotate(f"{var_label.upper()}  |  FINCA: {str(finca_sel).upper()}  |  {desc_texto}",
+                (0.5, 1), xycoords='axes fraction', xytext=(0, 15), textcoords='offset points',
+                ha='center', va='bottom', fontsize=9.5)
+
+    # Posición real del mapa en la página (en puntos PDF), después de todo el dibujo
+    fig.canvas.draw()
+    rosa_vientos(fig, ax, esq_rosa, tam_rosa)
     pos = ax.get_position()
     W, H = fig.get_size_inches() * 72
     bbox_pts = (pos.x0 * W, pos.y0 * H, pos.x1 * W, pos.y1 * H)
@@ -474,26 +703,26 @@ def generar():
     png = io.BytesIO()
     fig.savefig(png, format='png', dpi=130)
     pdf = io.BytesIO()
-    fig.savefig(pdf, format='pdf', dpi=300)     # SIN bbox_inches='tight' (cambiaría la posición)
+    fig.savefig(pdf, format='pdf', dpi=250)     # SIN bbox_inches='tight' (cambiaría la posición)
     plt.close(fig)
 
     # ---------------- GeoPDF ----------------
     a_geo = Transformer.from_crs(utm, "EPSG:4326", always_xy=True)
-    esquinas = []
-    for ex, ey in [(xmin, ymax), (xmin, ymin), (xmax, ymin), (xmax, ymax)]:
+    esquinas_ll = []
+    for ex, ey in [(vista[0], vista[3]), (vista[0], vista[1]), (vista[2], vista[1]), (vista[2], vista[3])]:
         lon, lat = a_geo.transform(ex, ey)
-        esquinas.append((lat, lon))
-    pdf_geo = geopdf(pdf.getvalue(), bbox_pts, esquinas, utm.to_epsg(), utm.to_wkt(version="WKT1_GDAL"))
+        esquinas_ll.append((lat, lon))
+    pdf_geo = geopdf(pdf.getvalue(), bbox_pts, esquinas_ll, utm.to_epsg(), utm.to_wkt(version="WKT1_GDAL"))
 
     tif = None
     if HAY_RASTERIO:
         tif = geotiff_rgba(grid_z, (xmin, ymin, xmax, ymax), utm.to_wkt())
 
-    return dict(png=png.getvalue(), pdf=pdf_geo, tif=tif, n=len(z),
+    return dict(png=png.getvalue(), pdf=pdf_geo, tif=tif, n=len(z), aviso=aviso_base,
                 zmax=float(z.max()), zmean=float(z.mean()), epsg=utm.to_epsg())
 
 
-firma = (finca_sel, var_label, power_idw, resolution, radio_max, solo_con_puntos,
+firma = (finca_sel, var_label, power_idw, resolution, radio_max, solo_con_puntos, mapa_base,
          col_lote, col_finca_geo, file_csv.name, capa_subida.name if capa_subida else capa_sel)
 
 if st.sidebar.button("🚀 Generar Mapa IDW", type="primary"):
@@ -514,6 +743,8 @@ if res:
     nombre = st.session_state['nombre']
     if st.session_state.get('firma') != firma:
         st.info("Cambiaste la finca o los parámetros: presiona **Generar Mapa IDW** para actualizar.")
+    if res.get('aviso'):
+        st.warning(res['aviso'])
     col_map, col_stats = st.columns([3, 1])
     with col_map:
         st.image(res['png'])
